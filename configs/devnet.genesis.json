@@ -1,0 +1,44 @@
+{
+  "chain_id": "blockagents-devnet-1",
+  "genesis_time": "2026-03-17T00:00:00Z",
+  "faucet_address": "faucet",
+  "accounts": [
+    {
+      "address": "faucet",
+      "balance": 1000000,
+      "reputation": 1
+    },
+    {
+      "address": "alice",
+      "balance": 10000,
+      "reputation": 0.65
+    },
+    {
+      "address": "bob",
+      "balance": 10000,
+      "reputation": 0.6
+    },
+    {
+      "address": "carol",
+      "balance": 10000,
+      "reputation": 0.55
+    }
+  ],
+  "validators": [
+    {
+      "address": "validator-1",
+      "public_key": "1111111111111111111111111111111111111111111111111111111111111111",
+      "power": 1
+    },
+    {
+      "address": "validator-2",
+      "public_key": "2222222222222222222222222222222222222222222222222222222222222222",
+      "power": 1
+    },
+    {
+      "address": "validator-3",
+      "public_key": "3333333333333333333333333333333333333333333333333333333333333333",
+      "power": 1
+    }
+  ]
+}

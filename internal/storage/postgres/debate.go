@@ -1,0 +1,175 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"aichain/internal/execution"
+	"aichain/internal/protocol"
+)
+
+func initializeDebateStateTx(ctx context.Context, tx *sql.Tx, task protocol.Task, nowUnix int64) error {
+	stageDuration := execution.ComputeStageDurationSeconds(nowUnix, task.Input.Deadline, task.Input.DebateRounds)
+	stageStartedAt := time.Unix(nowUnix, 0).UTC()
+	stageDeadline := time.Unix(execution.ClampStageDeadline(nowUnix, stageDuration, task.Input.Deadline), 0).UTC()
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO task_debate_state (task_id, current_round, current_stage, stage_duration_seconds, stage_started_at, stage_deadline, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+		task.ID,
+		1,
+		protocol.DebateStageProposal,
+		stageDuration,
+		stageStartedAt,
+		stageDeadline,
+	); err != nil {
+		return fmt.Errorf("insert debate state: %w", err)
+	}
+
+	return nil
+}
+
+func advanceDebateStagesTx(ctx context.Context, tx *sql.Tx, nowUnix int64) ([]protocol.Event, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT ds.task_id
+		 FROM task_debate_state ds
+		 INNER JOIN tasks t ON t.id = ds.task_id
+		 WHERE t.status = $1
+		 ORDER BY ds.task_id ASC
+		 FOR UPDATE OF ds`,
+		protocol.StatusOpen,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query debate states: %w", err)
+	}
+	defer rows.Close()
+
+	taskIDs := make([]string, 0)
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			return nil, fmt.Errorf("scan debate state task id: %w", err)
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate debate states: %w", err)
+	}
+
+	events := make([]protocol.Event, 0)
+	for _, taskID := range taskIDs {
+		task, err := getTaskForUpdate(ctx, tx, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if task.Type != protocol.TaskTypeBlockAgents || task.Status != protocol.StatusOpen {
+			continue
+		}
+
+		state, err := getDebateStateForUpdateTx(ctx, tx, taskID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+
+		for state.CurrentStage != protocol.DebateStageComplete && state.StageDeadline.Unix() <= nowUnix {
+			nextRound, nextStage, terminal := execution.NextDebateState(state.CurrentRound, state.CurrentStage, task.Input.DebateRounds)
+			state.CurrentRound = nextRound
+			state.CurrentStage = nextStage
+			state.StageStartedAt = time.Unix(nowUnix, 0).UTC()
+			state.StageDeadline = time.Unix(execution.ClampStageDeadline(nowUnix, state.StageDurationSec, task.Input.Deadline), 0).UTC()
+			if terminal {
+				state.StageDeadline = time.Unix(task.Input.Deadline, 0).UTC()
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE task_debate_state
+				 SET current_round = $2,
+				     current_stage = $3,
+				     stage_started_at = $4,
+				     stage_deadline = $5,
+				     updated_at = NOW()
+				 WHERE task_id = $1`,
+				taskID,
+				state.CurrentRound,
+				state.CurrentStage,
+				state.StageStartedAt,
+				state.StageDeadline,
+			); err != nil {
+				return nil, fmt.Errorf("advance debate stage: %w", err)
+			}
+
+			events = append(events, protocol.Event{
+				Type: "debate.stage_advanced",
+				Attributes: map[string]string{
+					"task_id":       taskID,
+					"current_round": fmt.Sprintf("%d", state.CurrentRound),
+					"current_stage": state.CurrentStage,
+				},
+			})
+
+			if terminal {
+				break
+			}
+		}
+	}
+
+	return events, nil
+}
+
+func getDebateStateForUpdateTx(ctx context.Context, tx *sql.Tx, taskID string) (protocol.DebateState, error) {
+	var state protocol.DebateState
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT task_id, current_round, current_stage, stage_duration_seconds, stage_started_at, stage_deadline, updated_at
+		 FROM task_debate_state
+		 WHERE task_id = $1
+		 FOR UPDATE`,
+		taskID,
+	).Scan(&state.TaskID, &state.CurrentRound, &state.CurrentStage, &state.StageDurationSec, &state.StageStartedAt, &state.StageDeadline, &state.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return protocol.DebateState{}, ErrNotFound
+		}
+		return protocol.DebateState{}, fmt.Errorf("lock debate state: %w", err)
+	}
+	return state, nil
+}
+
+func requireDebateStageTx(ctx context.Context, tx *sql.Tx, task protocol.Task, expectedRound int, expectedStage string) (protocol.DebateState, error) {
+	state, err := getDebateStateForUpdateTx(ctx, tx, task.ID)
+	if err != nil {
+		return protocol.DebateState{}, err
+	}
+	if state.CurrentStage != expectedStage {
+		return protocol.DebateState{}, fmt.Errorf("%w: current debate stage is %s", ErrValidation, state.CurrentStage)
+	}
+	if state.CurrentRound != expectedRound {
+		return protocol.DebateState{}, fmt.Errorf("%w: current debate round is %d", ErrValidation, state.CurrentRound)
+	}
+	return state, nil
+}
+
+func hasProofForStageTx(ctx context.Context, tx *sql.Tx, taskID string, agent string, round int, stage string) (bool, error) {
+	var count int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(1)
+		 FROM proof_artifacts
+		 WHERE task_id = $1 AND agent = $2 AND round = $3 AND stage = $4`,
+		taskID,
+		agent,
+		round,
+		stage,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("count proofs for stage: %w", err)
+	}
+	return count > 0, nil
+}
