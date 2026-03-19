@@ -16,7 +16,11 @@ func TestVerifyRotationProof(t *testing.T) {
 	newPublicKeyHex := hex.EncodeToString(newPublicKey)
 	nonce := int64(3)
 
-	signature := ed25519.Sign(newPrivateKey, RotationSignBytes(chainID, agent, oldPublicKeyHex, newPublicKeyHex, nonce))
+	signBytes, err := RotationSignBytes(chainID, agent, oldPublicKeyHex, newPublicKeyHex, nonce)
+	if err != nil {
+		t.Fatalf("rotation sign bytes: %v", err)
+	}
+	signature := ed25519.Sign(newPrivateKey, signBytes)
 	if err := VerifyRotationProof(chainID, agent, oldPublicKeyHex, newPublicKeyHex, nonce, hex.EncodeToString(signature)); err != nil {
 		t.Fatalf("verify rotation proof: %v", err)
 	}

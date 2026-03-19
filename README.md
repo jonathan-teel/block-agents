@@ -222,6 +222,10 @@ export FAUCET_GRANT_AMOUNT="1000"
 export DEFAULT_AGENT_REPUTATION="0.5"
 ```
 
+Amount fields use fixed-point decimal encoding with 6 fractional digits of precision and are stored on-chain as integer micro-units. JSON APIs accept decimal literals such as `25`, `25.5`, or `25.500001`.
+
+The faucet is disabled by default. The devnet example above enables it explicitly.
+
 Run the node:
 
 ```bash
@@ -398,8 +402,7 @@ POST /v1/dev/faucet
 Content-Type: application/json
 
 {
-  "agent": "worker-1",
-  "amount": 1000
+  "agent": "worker-1"
 }
 ```
 

@@ -3,6 +3,7 @@ package execution
 import (
 	"crypto/sha256"
 	"math"
+	"sort"
 
 	"aichain/internal/protocol"
 )
@@ -11,14 +12,14 @@ type WeightedSubmission struct {
 	SubmissionID int64
 	Agent        string
 	Value        float64
-	Stake        float64
+	Stake        protocol.Amount
 	Reputation   float64
 }
 
 type ScoredSubmission struct {
 	SubmissionID  int64
 	Agent         string
-	Stake         float64
+	Stake         protocol.Amount
 	OldReputation float64
 	Score         float64
 }
@@ -36,7 +37,7 @@ func ComputeWeightedConsensus(submissions []WeightedSubmission, maxWeight float6
 	var denominator float64
 
 	for _, submission := range submissions {
-		weight := submission.Stake * Clamp01(submission.Reputation)
+		weight := submission.Stake.Float64() * Clamp01(submission.Reputation)
 		if maxWeight > 0 && weight > maxWeight {
 			weight = maxWeight
 		}
@@ -73,27 +74,61 @@ func ScoreSubmissions(submissions []WeightedSubmission, outcome float64) []Score
 func RewardWeight(scores []ScoredSubmission) float64 {
 	var total float64
 	for _, score := range scores {
-		total += score.Score * score.Stake
+		total += score.Score * score.Stake.Float64()
 	}
 	return total
 }
 
-func ComputeRewards(scores []ScoredSubmission, rewardPool float64) map[int64]float64 {
-	rewards := make(map[int64]float64, len(scores))
+func ComputeRewards(scores []ScoredSubmission, rewardPool protocol.Amount) map[int64]protocol.Amount {
+	rewards := make(map[int64]protocol.Amount, len(scores))
 	total := RewardWeight(scores)
 
-	if total == 0 {
+	if total == 0 || rewardPool <= 0 {
 		for _, score := range scores {
 			rewards[score.SubmissionID] = 0
 		}
 		return rewards
 	}
 
+	type rewardRemainder struct {
+		SubmissionID int64
+		Remainder    float64
+	}
+
+	remainders := make([]rewardRemainder, 0, len(scores))
+	remaining := rewardPool
 	for _, score := range scores {
-		rewards[score.SubmissionID] = ((score.Score * score.Stake) / total) * rewardPool
+		weight := score.Score * score.Stake.Float64()
+		rawUnits := (weight / total) * float64(rewardPool)
+		base := protocol.Amount(math.Floor(rawUnits))
+		rewards[score.SubmissionID] = base
+		remaining -= base
+		remainders = append(remainders, rewardRemainder{
+			SubmissionID: score.SubmissionID,
+			Remainder:    rawUnits - float64(base),
+		})
+	}
+
+	sort.Slice(remainders, func(i, j int) bool {
+		if remainders[i].Remainder == remainders[j].Remainder {
+			return remainders[i].SubmissionID < remainders[j].SubmissionID
+		}
+		return remainders[i].Remainder > remainders[j].Remainder
+	})
+
+	for index := protocol.Amount(0); index < remaining; index++ {
+		target := remainders[int(index)%len(remainders)].SubmissionID
+		rewards[target]++
 	}
 
 	return rewards
+}
+
+func ScaleAmount(amount protocol.Amount, factor float64) protocol.Amount {
+	if amount <= 0 {
+		return 0
+	}
+	return protocol.Amount(math.Round(float64(amount) * Clamp01(factor)))
 }
 
 func BlendReputation(oldReputation float64, score float64) float64 {

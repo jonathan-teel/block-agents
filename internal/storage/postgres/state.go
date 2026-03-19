@@ -574,8 +574,8 @@ func listWeightedSubmissionsTx(ctx context.Context, tx *sql.Tx, taskID string) (
 	return submissions, nil
 }
 
-func lockBalanceTx(ctx context.Context, tx *sql.Tx, address string) (float64, error) {
-	var balance float64
+func lockBalanceTx(ctx context.Context, tx *sql.Tx, address string) (protocol.Amount, error) {
+	var balance protocol.Amount
 	if err := tx.QueryRowContext(
 		ctx,
 		`SELECT balance
@@ -604,7 +604,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				address    string
 				publicKey  string
 				nextNonce  int64
-				balance    float64
+				balance    protocol.Amount
 				reputation float64
 			)
 			if err := rows.Scan(&address, &publicKey, &nextNonce, &balance, &reputation); err != nil {
@@ -615,7 +615,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				address,
 				publicKey,
 				strconv.FormatInt(nextNonce, 10),
-				formatFloat(balance),
+				formatAmount(balance),
 				formatFloat(reputation),
 			}, "|"), nil
 		},
@@ -667,8 +667,8 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				oracleSource string
 				oracleEndpoint string
 				oraclePath string
-				rewardPool float64
-				minStake   float64
+				rewardPool protocol.Amount
+				minStake   protocol.Amount
 				status     string
 			)
 			if err := rows.Scan(&id, &creator, &taskType, &question, &deadline, &debateRounds, &workerCount, &minerCount, &roleSelectionPolicy, &oracleSource, &oracleEndpoint, &oraclePath, &rewardPool, &minStake, &status); err != nil {
@@ -688,8 +688,8 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				oracleSource,
 				oracleEndpoint,
 				oraclePath,
-				formatFloat(rewardPool),
-				formatFloat(minStake),
+				formatAmount(rewardPool),
+				formatAmount(minStake),
 				status,
 			}, "|"), nil
 		},
@@ -761,7 +761,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				taskID string
 				agent  string
 				value  float64
-				stake  float64
+				stake  protocol.Amount
 			)
 			if err := rows.Scan(&id, &taskID, &agent, &value, &stake); err != nil {
 				return "", err
@@ -772,7 +772,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				taskID,
 				agent,
 				formatFloat(value),
-				formatFloat(stake),
+				formatAmount(stake),
 			}, "|"), nil
 		},
 	); err != nil {
@@ -1014,7 +1014,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				id         int64
 				taskID     string
 				challenger string
-				bond       float64
+				bond       protocol.Amount
 				reason     string
 				status     string
 				resolver   string
@@ -1031,7 +1031,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				strconv.FormatInt(id, 10),
 				taskID,
 				challenger,
-				formatFloat(bond),
+				formatAmount(bond),
 				reason,
 				status,
 				resolver,
@@ -1075,7 +1075,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				title          string
 				description    string
 				targetAddress  string
-				amount         float64
+				amount         protocol.Amount
 				parameterName  string
 				parameterValue string
 				votingDeadline int64
@@ -1095,7 +1095,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				title,
 				description,
 				targetAddress,
-				formatFloat(amount),
+				formatAmount(amount),
 				parameterName,
 				parameterValue,
 				strconv.FormatInt(votingDeadline, 10),

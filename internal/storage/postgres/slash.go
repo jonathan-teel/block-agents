@@ -46,7 +46,7 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, cfg conf
 	events := make([]protocol.Event, 0, len(refs))
 	for _, item := range refs {
 		var (
-			balance    float64
+			balance    protocol.Amount
 			reputation float64
 		)
 		err := tx.QueryRowContext(
@@ -73,7 +73,7 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, cfg conf
 			return nil, fmt.Errorf("lock validator account for slashing: %w", err)
 		}
 
-		balancePenalty := balance * slashFraction
+		balancePenalty := execution.ScaleAmount(balance, slashFraction)
 		if balancePenalty > balance {
 			balancePenalty = balance
 		}
@@ -115,7 +115,7 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, cfg conf
 				"validator":           item.Validator,
 				"evidence_id":         fmt.Sprintf("%d", item.ID),
 				"evidence_type":       item.EvidenceType,
-				"balance_penalty":     formatFloat(balancePenalty),
+				"balance_penalty":     formatAmount(balancePenalty),
 				"reputation_penalty":  formatFloat(reputationPenalty),
 				"treasury":            cfg.TreasuryAddress,
 			},

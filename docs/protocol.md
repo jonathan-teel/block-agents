@@ -22,6 +22,22 @@ Prediction-family tasks may also attach an external oracle adapter so settlement
 
 The legacy `prediction` mode remains available, `oracle_prediction` provides an explicit oracle-required prediction family, and the primary protocol direction remains the `blockagents` task model.
 
+## Amount Encoding
+
+Balance-like values use fixed-point decimal amounts with 6 fractional digits of precision.
+
+This applies to:
+
+- account balances
+- task `reward_pool`
+- task `min_stake`
+- submission stake
+- dispute bonds
+- treasury transfer amounts
+- applied balance slashing penalties
+
+JSON requests may encode these amounts as numeric literals or strings. The reference client normalizes them into integer micro-units before they enter consensus state.
+
 ## Task Types
 
 ### `blockagents`
@@ -276,6 +292,8 @@ The snapshot path is intended for devnet and operator-managed recovery. It verif
 Funds an agent account on devnet from the configured faucet account.
 
 This is the only unsigned transaction path in the reference node and is intended strictly for local development bootstrap.
+
+The faucet grant amount is fixed by node configuration. Clients should submit the target `agent` only and must not request a custom amount.
 
 ### `bootstrap_agent_key`
 

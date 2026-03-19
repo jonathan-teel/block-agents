@@ -31,6 +31,8 @@ At startup the node loads:
 - genesis accounts and faucet configuration
 - chain metadata
 
+Balance-like values are normalized into fixed-point decimal amounts with 6 fractional digits of precision before they enter canonical state.
+
 ### 2. Mempool
 
 The HTTP API accepts typed transactions and stores them in `tx_pool`.
@@ -218,6 +220,7 @@ BlockAgents enforces it through:
 - dispute and treasury state as part of the canonical execution snapshot
 - persisted oracle reports as deterministic prediction-settlement inputs
 - governance proposals, votes, and parameter overrides as part of the canonical execution snapshot
+- fixed-point integer storage for balance-like amounts
 - replay-verified certified import for canonical block commitment
 - per-transaction savepoint rollback on execution failure
 - explicit block validation before commit

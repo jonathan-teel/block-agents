@@ -41,7 +41,7 @@ type Config struct {
 	ValidatorSlashReputationPenalty float64
 	TreasuryAddress         string
 	TaskDisputeWindow       time.Duration
-	TaskDisputeBond         float64
+	TaskDisputeBond         protocol.Amount
 	OraclePollInterval      time.Duration
 	OracleHTTPTimeout       int
 	AllowPrivateOracleEndpoints bool
@@ -50,7 +50,7 @@ type Config struct {
 	MaxEffectiveWeight      float64
 	CreateEmptyBlocks       bool
 	EnableFaucet            bool
-	FaucetGrantAmount       float64
+	FaucetGrantAmount       protocol.Amount
 	DefaultAgentReputation  float64
 	Genesis                 protocol.Genesis
 }
@@ -89,7 +89,7 @@ func Load() (Config, error) {
 		ValidatorSlashReputationPenalty: getFloatEnv("VALIDATOR_SLASH_REPUTATION_PENALTY", 0.2),
 		TreasuryAddress:         getEnv("TREASURY_ADDRESS", "treasury"),
 		TaskDisputeWindow:       time.Duration(getIntEnv("TASK_DISPUTE_WINDOW_SECONDS", 3600)) * time.Second,
-		TaskDisputeBond:         getFloatEnv("TASK_DISPUTE_BOND", 25),
+		TaskDisputeBond:         getAmountEnv("TASK_DISPUTE_BOND", 25),
 		OraclePollInterval:      time.Duration(getIntEnv("ORACLE_POLL_INTERVAL_SECONDS", 15)) * time.Second,
 		OracleHTTPTimeout:       getIntEnv("ORACLE_HTTP_TIMEOUT_SECONDS", 10),
 		AllowPrivateOracleEndpoints: getBoolEnv("ALLOW_PRIVATE_ORACLE_ENDPOINTS", false),
@@ -97,8 +97,8 @@ func Load() (Config, error) {
 		MaxTransactionsPerBlock: getIntEnv("MAX_TRANSACTIONS_PER_BLOCK", 250),
 		MaxEffectiveWeight:      getFloatEnv("MAX_EFFECTIVE_WEIGHT", 100),
 		CreateEmptyBlocks:       getBoolEnv("CREATE_EMPTY_BLOCKS", true),
-		EnableFaucet:            getBoolEnv("ENABLE_FAUCET", true),
-		FaucetGrantAmount:       getFloatEnv("FAUCET_GRANT_AMOUNT", 1000),
+		EnableFaucet:            getBoolEnv("ENABLE_FAUCET", false),
+		FaucetGrantAmount:       getAmountEnv("FAUCET_GRANT_AMOUNT", 1000),
 		DefaultAgentReputation:  getFloatEnv("DEFAULT_AGENT_REPUTATION", 0.5),
 	}
 
@@ -360,6 +360,19 @@ func getFloatEnv(key string, fallback float64) float64 {
 		return fallback
 	}
 
+	return value
+}
+
+func getAmountEnv(key string, fallback protocol.Amount) protocol.Amount {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+
+	value, err := protocol.ParseAmountString(raw)
+	if err != nil {
+		return fallback
+	}
 	return value
 }
 

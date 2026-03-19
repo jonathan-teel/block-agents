@@ -26,8 +26,8 @@ func TestValidateBlock(t *testing.T) {
 	}
 
 	tx, err := NewTransaction(TxTypeFundAgent, "faucet", struct {
-		Agent  string  `json:"agent"`
-		Amount float64 `json:"amount"`
+		Agent  string `json:"agent"`
+		Amount Amount `json:"amount"`
 	}{
 		Agent:  "alice",
 		Amount: 100,
@@ -43,7 +43,7 @@ func TestValidateBlock(t *testing.T) {
 		Timestamp:  parentHeader.Timestamp.Add(5 * time.Second),
 		Proposer:   "node-1",
 		TxRoot:     ComputeMerkleRoot([]string{tx.Hash}),
-		StateRoot:  HashStrings([]string{"agent|alice|100.00000000|0.50000000"}),
+		StateRoot:  HashStrings([]string{"agent|alice|100|0.50000000"}),
 		TxCount:    1,
 	}
 	header.AppHash = BuildAppHash(header)

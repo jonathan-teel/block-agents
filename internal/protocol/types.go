@@ -73,7 +73,7 @@ type Genesis struct {
 type GenesisAccount struct {
 	Address    string `json:"address"`
 	PublicKey  string `json:"public_key,omitempty"`
-	Balance    float64 `json:"balance"`
+	Balance    Amount `json:"balance"`
 	Reputation float64 `json:"reputation"`
 }
 
@@ -106,8 +106,8 @@ type Task struct {
 	Creator    string    `json:"creator"`
 	Type       string    `json:"type"`
 	Input      TaskInput `json:"input"`
-	RewardPool float64   `json:"reward_pool"`
-	MinStake   float64   `json:"min_stake"`
+	RewardPool Amount    `json:"reward_pool"`
+	MinStake   Amount    `json:"min_stake"`
 	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"created_at"`
 }
@@ -117,7 +117,7 @@ type Submission struct {
 	TaskID    string    `json:"task_id"`
 	Agent     string    `json:"agent"`
 	Value     float64   `json:"value"`
-	Stake     float64   `json:"stake"`
+	Stake     Amount    `json:"stake"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -267,7 +267,7 @@ type ConsensusEvidence struct {
 	ConflictingBlockHash string   `json:"conflicting_block_hash"`
 	ObservedAt          time.Time `json:"observed_at"`
 	ProcessedAt         *time.Time `json:"processed_at,omitempty"`
-	AppliedBalancePenalty float64 `json:"applied_balance_penalty,omitempty"`
+	AppliedBalancePenalty Amount `json:"applied_balance_penalty,omitempty"`
 	AppliedReputationPenalty float64 `json:"applied_reputation_penalty,omitempty"`
 	Details             string    `json:"details,omitempty"`
 }
@@ -319,7 +319,7 @@ type Agent struct {
 	Address    string    `json:"address"`
 	PublicKey  string    `json:"public_key,omitempty"`
 	NextNonce  int64     `json:"next_nonce"`
-	Balance    float64   `json:"balance"`
+	Balance    Amount    `json:"balance"`
 	Reputation float64   `json:"reputation"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -340,7 +340,7 @@ type TaskDispute struct {
 	ID         int64      `json:"id"`
 	TaskID      string     `json:"task_id"`
 	Challenger  string     `json:"challenger"`
-	Bond        float64    `json:"bond"`
+	Bond        Amount     `json:"bond"`
 	Reason      string     `json:"reason"`
 	Status      string     `json:"status"`
 	Resolver    string     `json:"resolver,omitempty"`
@@ -375,7 +375,7 @@ type GovernanceProposal struct {
 	Title          string     `json:"title"`
 	Description    string     `json:"description"`
 	TargetAddress  string     `json:"target_address,omitempty"`
-	Amount         float64    `json:"amount,omitempty"`
+	Amount         Amount     `json:"amount,omitempty"`
 	ParameterName  string     `json:"parameter_name,omitempty"`
 	ParameterValue string     `json:"parameter_value,omitempty"`
 	VotingDeadline int64      `json:"voting_deadline"`
@@ -415,8 +415,8 @@ type CreateTaskRequest struct {
 	Type         string  `json:"type,omitempty"`
 	Question     string  `json:"question"`
 	Deadline     int64   `json:"deadline"`
-	RewardPool   float64 `json:"reward_pool"`
-	MinStake     float64 `json:"min_stake"`
+	RewardPool   Amount  `json:"reward_pool"`
+	MinStake     Amount  `json:"min_stake"`
 	DebateRounds int     `json:"debate_rounds,omitempty"`
 	WorkerCount  int     `json:"worker_count,omitempty"`
 	MinerCount   int     `json:"miner_count,omitempty"`
@@ -431,7 +431,7 @@ type SubmitRequest struct {
 	TaskID string  `json:"task_id"`
 	Agent  string  `json:"agent"`
 	Value  float64 `json:"value"`
-	Stake  float64 `json:"stake"`
+	Stake  Amount  `json:"stake"`
 	Auth   TxAuth  `json:"auth"`
 }
 
@@ -487,7 +487,7 @@ type SubmitProofRequest struct {
 
 type FundAgentRequest struct {
 	Agent  string  `json:"agent"`
-	Amount float64 `json:"amount"`
+	Amount Amount  `json:"amount"`
 	Auth   TxAuth  `json:"auth"`
 }
 
@@ -538,7 +538,7 @@ type SubmitGovernanceProposalRequest struct {
 	Title          string  `json:"title"`
 	Description    string  `json:"description"`
 	TargetAddress  string  `json:"target_address,omitempty"`
-	Amount         float64 `json:"amount,omitempty"`
+	Amount         Amount  `json:"amount,omitempty"`
 	ParameterName  string  `json:"parameter_name,omitempty"`
 	ParameterValue string  `json:"parameter_value,omitempty"`
 	VotingDeadline int64   `json:"voting_deadline"`

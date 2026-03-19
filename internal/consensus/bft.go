@@ -80,7 +80,11 @@ func (s ValidatorSet) Proposer(height int64, round int) (protocol.Validator, boo
 }
 
 func SignProposal(proposal protocol.ConsensusProposal, privateKey ed25519.PrivateKey) (string, error) {
-	signature := ed25519.Sign(privateKey, proposalSignBytes(proposal))
+	signBytes, err := proposalSignBytes(proposal)
+	if err != nil {
+		return "", err
+	}
+	signature := ed25519.Sign(privateKey, signBytes)
 	return hex.EncodeToString(signature), nil
 }
 
@@ -99,11 +103,19 @@ func VerifyProposal(set ValidatorSet, proposal protocol.ConsensusProposal) error
 	if proposal.BlockHeight != proposal.Height {
 		return fmt.Errorf("proposal block height must match consensus height")
 	}
-	return verifySignature(validator.PublicKey, proposal.Signature, proposalSignBytes(proposal))
+	signBytes, err := proposalSignBytes(proposal)
+	if err != nil {
+		return err
+	}
+	return verifySignature(validator.PublicKey, proposal.Signature, signBytes)
 }
 
 func SignVote(vote protocol.ConsensusVote, privateKey ed25519.PrivateKey) (string, error) {
-	signature := ed25519.Sign(privateKey, voteSignBytes(vote))
+	signBytes, err := voteSignBytes(vote)
+	if err != nil {
+		return "", err
+	}
+	signature := ed25519.Sign(privateKey, signBytes)
 	return hex.EncodeToString(signature), nil
 }
 
@@ -115,11 +127,19 @@ func VerifyVote(set ValidatorSet, vote protocol.ConsensusVote) error {
 	if vote.Type != VoteTypePrevote && vote.Type != VoteTypePrecommit {
 		return fmt.Errorf("unsupported vote type %s", vote.Type)
 	}
-	return verifySignature(validator.PublicKey, vote.Signature, voteSignBytes(vote))
+	signBytes, err := voteSignBytes(vote)
+	if err != nil {
+		return err
+	}
+	return verifySignature(validator.PublicKey, vote.Signature, signBytes)
 }
 
 func SignRoundChange(message protocol.ConsensusRoundChange, privateKey ed25519.PrivateKey) (string, error) {
-	signature := ed25519.Sign(privateKey, roundChangeSignBytes(message))
+	signBytes, err := roundChangeSignBytes(message)
+	if err != nil {
+		return "", err
+	}
+	signature := ed25519.Sign(privateKey, signBytes)
 	return hex.EncodeToString(signature), nil
 }
 
@@ -134,11 +154,19 @@ func VerifyRoundChange(set ValidatorSet, message protocol.ConsensusRoundChange) 
 	if strings.TrimSpace(message.Reason) == "" {
 		return fmt.Errorf("round-change reason is required")
 	}
-	return verifySignature(validator.PublicKey, message.Signature, roundChangeSignBytes(message))
+	signBytes, err := roundChangeSignBytes(message)
+	if err != nil {
+		return err
+	}
+	return verifySignature(validator.PublicKey, message.Signature, signBytes)
 }
 
 func SignPeerHello(message protocol.PeerHello, privateKey ed25519.PrivateKey) (string, error) {
-	signature := ed25519.Sign(privateKey, peerHelloSignBytes(message))
+	signBytes, err := peerHelloSignBytes(message)
+	if err != nil {
+		return "", err
+	}
+	signature := ed25519.Sign(privateKey, signBytes)
 	return hex.EncodeToString(signature), nil
 }
 
@@ -153,11 +181,19 @@ func VerifyPeerHello(set ValidatorSet, message protocol.PeerHello) error {
 	if strings.TrimSpace(message.ListenAddr) == "" {
 		return fmt.Errorf("peer hello listen_addr is required")
 	}
-	return verifySignature(validator.PublicKey, message.Signature, peerHelloSignBytes(message))
+	signBytes, err := peerHelloSignBytes(message)
+	if err != nil {
+		return err
+	}
+	return verifySignature(validator.PublicKey, message.Signature, signBytes)
 }
 
 func SignPeerStatus(status protocol.PeerStatus, privateKey ed25519.PrivateKey) (string, error) {
-	signature := ed25519.Sign(privateKey, peerStatusSignBytes(status))
+	signBytes, err := peerStatusSignBytes(status)
+	if err != nil {
+		return "", err
+	}
+	signature := ed25519.Sign(privateKey, signBytes)
 	return hex.EncodeToString(signature), nil
 }
 
@@ -172,7 +208,11 @@ func VerifyPeerStatus(set ValidatorSet, status protocol.PeerStatus) error {
 	if strings.TrimSpace(status.ListenAddr) == "" {
 		return fmt.Errorf("peer status listen_addr is required")
 	}
-	return verifySignature(validator.PublicKey, status.Signature, peerStatusSignBytes(status))
+	signBytes, err := peerStatusSignBytes(status)
+	if err != nil {
+		return err
+	}
+	return verifySignature(validator.PublicKey, status.Signature, signBytes)
 }
 
 type VoteTracker struct {
@@ -365,7 +405,7 @@ func voteKey(height int64, round int, voteType string, blockHash string) string 
 	return fmt.Sprintf("%d/%d/%s/%s", height, round, voteType, blockHash)
 }
 
-func proposalSignBytes(proposal protocol.ConsensusProposal) []byte {
+func proposalSignBytes(proposal protocol.ConsensusProposal) ([]byte, error) {
 	type signableProposal struct {
 		ChainID     string `json:"chain_id"`
 		Height      int64  `json:"height"`
@@ -375,7 +415,7 @@ func proposalSignBytes(proposal protocol.ConsensusProposal) []byte {
 		BlockHeight int64  `json:"block_height"`
 		ParentHash  string `json:"parent_hash"`
 	}
-	return mustMarshal(signableProposal{
+	return json.Marshal(signableProposal{
 		ChainID:     proposal.ChainID,
 		Height:      proposal.Height,
 		Round:       proposal.Round,
@@ -386,7 +426,7 @@ func proposalSignBytes(proposal protocol.ConsensusProposal) []byte {
 	})
 }
 
-func voteSignBytes(vote protocol.ConsensusVote) []byte {
+func voteSignBytes(vote protocol.ConsensusVote) ([]byte, error) {
 	type signableVote struct {
 		ChainID   string `json:"chain_id"`
 		Height    int64  `json:"height"`
@@ -395,7 +435,7 @@ func voteSignBytes(vote protocol.ConsensusVote) []byte {
 		Voter     string `json:"voter"`
 		BlockHash string `json:"block_hash"`
 	}
-	return mustMarshal(signableVote{
+	return json.Marshal(signableVote{
 		ChainID:   vote.ChainID,
 		Height:    vote.Height,
 		Round:     vote.Round,
@@ -405,7 +445,7 @@ func voteSignBytes(vote protocol.ConsensusVote) []byte {
 	})
 }
 
-func roundChangeSignBytes(message protocol.ConsensusRoundChange) []byte {
+func roundChangeSignBytes(message protocol.ConsensusRoundChange) ([]byte, error) {
 	type signableRoundChange struct {
 		ChainID   string `json:"chain_id"`
 		Height    int64  `json:"height"`
@@ -413,7 +453,7 @@ func roundChangeSignBytes(message protocol.ConsensusRoundChange) []byte {
 		Validator string `json:"validator"`
 		Reason    string `json:"reason"`
 	}
-	return mustMarshal(signableRoundChange{
+	return json.Marshal(signableRoundChange{
 		ChainID:   message.ChainID,
 		Height:    message.Height,
 		Round:     message.Round,
@@ -422,7 +462,7 @@ func roundChangeSignBytes(message protocol.ConsensusRoundChange) []byte {
 	})
 }
 
-func peerHelloSignBytes(message protocol.PeerHello) []byte {
+func peerHelloSignBytes(message protocol.PeerHello) ([]byte, error) {
 	type signablePeerHello struct {
 		NodeID           string    `json:"node_id"`
 		ChainID          string    `json:"chain_id"`
@@ -431,7 +471,7 @@ func peerHelloSignBytes(message protocol.PeerHello) []byte {
 		ValidatorAddress string    `json:"validator_address"`
 		SeenAt           time.Time `json:"seen_at"`
 	}
-	return mustMarshal(signablePeerHello{
+	return json.Marshal(signablePeerHello{
 		NodeID:           strings.TrimSpace(message.NodeID),
 		ChainID:          strings.TrimSpace(message.ChainID),
 		GenesisHash:      strings.TrimSpace(message.GenesisHash),
@@ -441,7 +481,7 @@ func peerHelloSignBytes(message protocol.PeerHello) []byte {
 	})
 }
 
-func peerStatusSignBytes(status protocol.PeerStatus) []byte {
+func peerStatusSignBytes(status protocol.PeerStatus) ([]byte, error) {
 	type signablePeerStatus struct {
 		NodeID           string    `json:"node_id"`
 		ChainID          string    `json:"chain_id"`
@@ -452,7 +492,7 @@ func peerStatusSignBytes(status protocol.PeerStatus) []byte {
 		HeadHash         string    `json:"head_hash"`
 		ObservedAt       time.Time `json:"observed_at"`
 	}
-	return mustMarshal(signablePeerStatus{
+	return json.Marshal(signablePeerStatus{
 		NodeID:           strings.TrimSpace(status.NodeID),
 		ChainID:          strings.TrimSpace(status.ChainID),
 		GenesisHash:      strings.TrimSpace(status.GenesisHash),
@@ -477,12 +517,4 @@ func verifySignature(publicKeyHex string, signatureHex string, payload []byte) e
 		return fmt.Errorf("signature verification failed")
 	}
 	return nil
-}
-
-func mustMarshal(value any) []byte {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		panic(err)
-	}
-	return payload
 }

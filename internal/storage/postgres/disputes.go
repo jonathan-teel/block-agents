@@ -86,7 +86,7 @@ func (s *Store) executeOpenDisputeTx(ctx context.Context, tx *sql.Tx, pending pe
 				"dispute_id":  strconv.FormatInt(disputeID, 10),
 				"task_id":     task.ID,
 				"challenger":  payload.Challenger,
-				"bond":        formatFloat(disputeBond),
+				"bond":        formatAmount(disputeBond),
 				"opened_at":   openedAt.UTC().Format(time.RFC3339),
 			},
 		},

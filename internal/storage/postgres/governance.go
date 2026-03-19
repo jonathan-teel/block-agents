@@ -494,9 +494,9 @@ func validateGovernanceParameterValue(name string, value string) error {
 	value = strings.TrimSpace(value)
 	switch name {
 	case "task_dispute_bond":
-		parsed, err := strconv.ParseFloat(value, 64)
+		parsed, err := protocol.ParseAmountString(value)
 		if err != nil || parsed <= 0 {
-			return fmt.Errorf("%w: task_dispute_bond must be a positive float", ErrValidation)
+			return fmt.Errorf("%w: task_dispute_bond must be a positive decimal amount", ErrValidation)
 		}
 	case "task_dispute_window_seconds":
 		parsed, err := strconv.Atoi(value)
@@ -543,12 +543,12 @@ func governanceParameterValueTx(ctx context.Context, querier interface {
 
 func effectiveTaskDisputeBondTx(ctx context.Context, querier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, cfg config.Config) float64 {
+}, cfg config.Config) protocol.Amount {
 	value, ok, err := governanceParameterValueTx(ctx, querier, "task_dispute_bond")
 	if err != nil || !ok {
 		return cfg.TaskDisputeBond
 	}
-	parsed, err := strconv.ParseFloat(value, 64)
+	parsed, err := protocol.ParseAmountString(value)
 	if err != nil || parsed <= 0 {
 		return cfg.TaskDisputeBond
 	}

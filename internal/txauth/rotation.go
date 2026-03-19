@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func RotationSignBytes(chainID string, agent string, oldPublicKey string, newPublicKey string, nonce int64) []byte {
+func RotationSignBytes(chainID string, agent string, oldPublicKey string, newPublicKey string, nonce int64) ([]byte, error) {
 	type signableRotation struct {
 		ChainID      string `json:"chain_id"`
 		Agent        string `json:"agent"`
@@ -17,17 +17,13 @@ func RotationSignBytes(chainID string, agent string, oldPublicKey string, newPub
 		Nonce        int64  `json:"nonce"`
 	}
 
-	payload, err := json.Marshal(signableRotation{
+	return json.Marshal(signableRotation{
 		ChainID:      strings.TrimSpace(chainID),
 		Agent:        strings.TrimSpace(agent),
 		OldPublicKey: NormalizePublicKey(oldPublicKey),
 		NewPublicKey: NormalizePublicKey(newPublicKey),
 		Nonce:        nonce,
 	})
-	if err != nil {
-		panic(err)
-	}
-	return payload
 }
 
 func VerifyRotationProof(chainID string, agent string, oldPublicKey string, newPublicKey string, nonce int64, signatureHex string) error {
@@ -39,7 +35,11 @@ func VerifyRotationProof(chainID string, agent string, oldPublicKey string, newP
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		return fmt.Errorf("decode new_signature: invalid signature")
 	}
-	if !ed25519.Verify(publicKey, RotationSignBytes(chainID, agent, oldPublicKey, newPublicKey, nonce), signature) {
+	signBytes, err := RotationSignBytes(chainID, agent, oldPublicKey, newPublicKey, nonce)
+	if err != nil {
+		return fmt.Errorf("build rotation sign bytes: %w", err)
+	}
+	if !ed25519.Verify(publicKey, signBytes, signature) {
 		return fmt.Errorf("new_signature verification failed")
 	}
 	return nil

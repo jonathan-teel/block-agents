@@ -39,14 +39,18 @@ func VerifyTransaction(chainID string, tx protocol.Transaction) error {
 	if err != nil {
 		return fmt.Errorf("decode signature: %w", err)
 	}
-	if !ed25519.Verify(publicKey, SignBytes(chainID, tx), signature) {
+	signBytes, err := SignBytes(chainID, tx)
+	if err != nil {
+		return fmt.Errorf("build sign bytes: %w", err)
+	}
+	if !ed25519.Verify(publicKey, signBytes, signature) {
 		return fmt.Errorf("signature verification failed")
 	}
 
 	return nil
 }
 
-func SignBytes(chainID string, tx protocol.Transaction) []byte {
+func SignBytes(chainID string, tx protocol.Transaction) ([]byte, error) {
 	type signableTransaction struct {
 		ChainID   string          `json:"chain_id"`
 		Type      protocol.TxType `json:"type"`
@@ -56,7 +60,7 @@ func SignBytes(chainID string, tx protocol.Transaction) []byte {
 		Payload   json.RawMessage `json:"payload"`
 	}
 
-	return mustMarshal(signableTransaction{
+	return json.Marshal(signableTransaction{
 		ChainID:   strings.TrimSpace(chainID),
 		Type:      tx.Type,
 		Sender:    strings.TrimSpace(tx.Sender),
@@ -79,12 +83,4 @@ func decodeHex(value string, expectedLen int) ([]byte, error) {
 		return nil, fmt.Errorf("expected %d bytes, got %d", expectedLen, len(decoded))
 	}
 	return decoded, nil
-}
-
-func mustMarshal(value any) []byte {
-	payload, err := json.Marshal(value)
-	if err != nil {
-		panic(err)
-	}
-	return payload
 }

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const latestSchemaVersion = 3
+const latestSchemaVersion = 4
 
 type migration struct {
 	Version int
@@ -74,6 +74,116 @@ CREATE TABLE IF NOT EXISTS fork_choice_preferences (
 
 CREATE INDEX IF NOT EXISTS idx_peer_registry_observed_at ON peer_registry(observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_validator_registry_active ON validator_registry(active, address);
+`,
+	},
+	{
+		Version: 4,
+		Name:    "phase4_fixed_point_amounts",
+		SQL: `
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'agents'
+		  AND column_name = 'balance'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE agents
+			ALTER COLUMN balance TYPE BIGINT USING ROUND(balance * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'tasks'
+		  AND column_name = 'reward_pool'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE tasks
+			ALTER COLUMN reward_pool TYPE BIGINT USING ROUND(reward_pool * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'tasks'
+		  AND column_name = 'min_stake'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE tasks
+			ALTER COLUMN min_stake TYPE BIGINT USING ROUND(min_stake * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'submissions'
+		  AND column_name = 'stake'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE submissions
+			ALTER COLUMN stake TYPE BIGINT USING ROUND(stake * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'task_disputes'
+		  AND column_name = 'bond'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE task_disputes
+			ALTER COLUMN bond TYPE BIGINT USING ROUND(bond * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'governance_proposals'
+		  AND column_name = 'amount'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE governance_proposals
+			ALTER COLUMN amount TYPE BIGINT USING ROUND(amount * 1000000)::BIGINT;
+	END IF;
+END $$;
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'consensus_evidence'
+		  AND column_name = 'applied_balance_penalty'
+		  AND data_type <> 'bigint'
+	) THEN
+		ALTER TABLE consensus_evidence
+			ALTER COLUMN applied_balance_penalty TYPE BIGINT USING ROUND(applied_balance_penalty * 1000000)::BIGINT;
+	END IF;
+END $$;
 `,
 	},
 }

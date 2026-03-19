@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS agents (
 	address TEXT PRIMARY KEY,
 	public_key TEXT NULL,
 	next_nonce BIGINT NOT NULL DEFAULT 0,
-	balance DOUBLE PRECISION NOT NULL CHECK (balance >= 0),
+	balance BIGINT NOT NULL CHECK (balance >= 0),
 	reputation DOUBLE PRECISION NOT NULL CHECK (reputation >= 0 AND reputation <= 1),
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -50,8 +50,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 	oracle_source TEXT NOT NULL DEFAULT '',
 	oracle_endpoint TEXT NOT NULL DEFAULT '',
 	oracle_path TEXT NOT NULL DEFAULT '',
-	reward_pool DOUBLE PRECISION NOT NULL CHECK (reward_pool >= 0),
-	min_stake DOUBLE PRECISION NOT NULL CHECK (min_stake > 0),
+	reward_pool BIGINT NOT NULL CHECK (reward_pool >= 0),
+	min_stake BIGINT NOT NULL CHECK (min_stake > 0),
 	status TEXT NOT NULL CHECK (status IN ('open', 'settled', 'disputed')),
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS submissions (
 	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	agent TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
 	value DOUBLE PRECISION NOT NULL CHECK (value >= 0 AND value <= 1),
-	stake DOUBLE PRECISION NOT NULL CHECK (stake > 0),
+	stake BIGINT NOT NULL CHECK (stake > 0),
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	CONSTRAINT submissions_task_agent_unique UNIQUE (task_id, agent)
 );
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS task_disputes (
 	id BIGSERIAL PRIMARY KEY,
 	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	challenger TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
-	bond DOUBLE PRECISION NOT NULL CHECK (bond > 0),
+	bond BIGINT NOT NULL CHECK (bond > 0),
 	reason TEXT NOT NULL,
 	status TEXT NOT NULL CHECK (status IN ('open', 'rejected', 'upheld')),
 	resolver TEXT NULL REFERENCES agents(address) ON DELETE RESTRICT,
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS governance_proposals (
 	title TEXT NOT NULL,
 	description TEXT NOT NULL,
 	target_address TEXT NOT NULL DEFAULT '',
-	amount DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (amount >= 0),
+	amount BIGINT NOT NULL DEFAULT 0 CHECK (amount >= 0),
 	parameter_name TEXT NOT NULL DEFAULT '',
 	parameter_value TEXT NOT NULL DEFAULT '',
 	voting_deadline BIGINT NOT NULL,
@@ -344,7 +344,7 @@ CREATE TABLE IF NOT EXISTS consensus_evidence (
 	details TEXT NOT NULL DEFAULT '',
 	observed_at TIMESTAMPTZ NOT NULL,
 	processed_at TIMESTAMPTZ NULL,
-	applied_balance_penalty DOUBLE PRECISION NOT NULL DEFAULT 0,
+	applied_balance_penalty BIGINT NOT NULL DEFAULT 0,
 	applied_reputation_penalty DOUBLE PRECISION NOT NULL DEFAULT 0,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	CONSTRAINT consensus_evidence_unique UNIQUE (evidence_type, validator, height, round, vote_type, block_hash, conflicting_block_hash)
@@ -390,7 +390,7 @@ ALTER TABLE block_transactions ADD COLUMN IF NOT EXISTS signature TEXT NULL;
 ALTER TABLE proof_artifacts ADD COLUMN IF NOT EXISTS claim_root TEXT NOT NULL DEFAULT '';
 ALTER TABLE proof_artifacts ADD COLUMN IF NOT EXISTS semantic_root TEXT NOT NULL DEFAULT '';
 ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
-ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS applied_balance_penalty DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS applied_balance_penalty BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS applied_reputation_penalty DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
 ALTER TABLE tasks ADD CONSTRAINT tasks_status_check CHECK (status IN ('open', 'settled', 'disputed'));
@@ -532,8 +532,8 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		Type         string  `json:"type,omitempty"`
 		Question     string  `json:"question"`
 		Deadline     int64   `json:"deadline"`
-		RewardPool   float64 `json:"reward_pool"`
-		MinStake     float64 `json:"min_stake"`
+		RewardPool   protocol.Amount `json:"reward_pool"`
+		MinStake     protocol.Amount `json:"min_stake"`
 		DebateRounds int     `json:"debate_rounds,omitempty"`
 		WorkerCount  int     `json:"worker_count,omitempty"`
 		MinerCount   int     `json:"miner_count,omitempty"`
@@ -578,8 +578,8 @@ func (s *Store) QueueSubmission(ctx context.Context, req protocol.SubmitRequest)
 	payload := struct {
 		TaskID string  `json:"task_id"`
 		Agent  string  `json:"agent"`
-		Value  float64 `json:"value"`
-		Stake  float64 `json:"stake"`
+		Value  float64         `json:"value"`
+		Stake  protocol.Amount `json:"stake"`
 	}{
 		TaskID: req.TaskID,
 		Agent:  req.Agent,
@@ -789,13 +789,14 @@ func (s *Store) QueueFunding(ctx context.Context, req protocol.FundAgentRequest)
 	if req.Agent == "" {
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: agent is required", ErrValidation)
 	}
-	if req.Amount <= 0 {
-		req.Amount = s.cfg.FaucetGrantAmount
+	if req.Amount != 0 {
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: faucet amount is fixed by node configuration", ErrValidation)
 	}
+	req.Amount = s.cfg.FaucetGrantAmount
 
 	payload := struct {
-		Agent  string  `json:"agent"`
-		Amount float64 `json:"amount"`
+		Agent  string          `json:"agent"`
+		Amount protocol.Amount `json:"amount"`
 	}{
 		Agent:  req.Agent,
 		Amount: req.Amount,
@@ -953,7 +954,7 @@ func (s *Store) QueueSubmitGovernanceProposal(ctx context.Context, req protocol.
 		Title          string  `json:"title"`
 		Description    string  `json:"description"`
 		TargetAddress  string  `json:"target_address,omitempty"`
-		Amount         float64 `json:"amount,omitempty"`
+		Amount         protocol.Amount `json:"amount,omitempty"`
 		ParameterName  string  `json:"parameter_name,omitempty"`
 		ParameterValue string  `json:"parameter_value,omitempty"`
 		VotingDeadline int64   `json:"voting_deadline"`
@@ -1041,6 +1042,10 @@ func (s *Store) enqueueTransaction(ctx context.Context, txType protocol.TxType, 
 
 func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', 8, 64)
+}
+
+func formatAmount(value protocol.Amount) string {
+	return value.String()
 }
 
 func nullIfEmpty(value string) any {

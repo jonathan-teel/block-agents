@@ -1,6 +1,10 @@
 package execution
 
-import "testing"
+import (
+	"testing"
+
+	"aichain/internal/protocol"
+)
 
 func TestComputeWeightedConsensus(t *testing.T) {
 	submissions := []WeightedSubmission{
@@ -27,10 +31,17 @@ func TestComputeRewards(t *testing.T) {
 
 	rewards := ComputeRewards(scores, 100)
 	if rewards[1] != 40 {
-		t.Fatalf("unexpected reward for submission 1: got %.2f want 40.00", rewards[1])
+		t.Fatalf("unexpected reward for submission 1: got %s want 40", rewards[1])
 	}
 	if rewards[2] != 60 {
-		t.Fatalf("unexpected reward for submission 2: got %.2f want 60.00", rewards[2])
+		t.Fatalf("unexpected reward for submission 2: got %s want 60", rewards[2])
+	}
+}
+
+func TestScaleAmount(t *testing.T) {
+	got := ScaleAmount(protocol.Amount(10_000_000), 0.25)
+	if got != protocol.Amount(2_500_000) {
+		t.Fatalf("unexpected scaled amount: got %s want 2.5", got)
 	}
 }
 

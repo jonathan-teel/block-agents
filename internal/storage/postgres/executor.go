@@ -175,7 +175,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 				"task_id":     taskID,
 				"creator":     payload.Creator,
 				"task_type":   payload.Type,
-				"reward_pool": formatFloat(payload.RewardPool),
+				"reward_pool": formatAmount(payload.RewardPool),
 				"deadline":    strconv.FormatInt(payload.Deadline, 10),
 				"role_selection_policy": payload.RoleSelectionPolicy,
 				"oracle_source": payload.OracleSource,
@@ -265,7 +265,7 @@ func (s *Store) executeSubmissionTx(ctx context.Context, tx *sql.Tx, pending pen
 				"task_id": payload.TaskID,
 				"agent":   payload.Agent,
 				"value":   formatFloat(payload.Value),
-				"stake":   formatFloat(payload.Stake),
+				"stake":   formatAmount(payload.Stake),
 			},
 		},
 	}, nil
@@ -807,7 +807,7 @@ func (s *Store) executeFundAgentTx(ctx context.Context, tx *sql.Tx, pending pend
 			Type: "agent.funded",
 			Attributes: map[string]string{
 				"agent":  payload.Agent,
-				"amount": formatFloat(payload.Amount),
+				"amount": formatAmount(payload.Amount),
 			},
 		},
 	}, nil
@@ -1083,7 +1083,7 @@ func (s *Store) settlePredictionTaskTx(ctx context.Context, tx *sql.Tx, task pro
 	}
 
 	for _, scored := range scores {
-		payout := rewards[scored.SubmissionID] + (scored.Stake * scored.Score)
+		payout := rewards[scored.SubmissionID] + execution.ScaleAmount(scored.Stake, scored.Score)
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE agents
@@ -1221,9 +1221,9 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 	}
 
 	workerReward := task.RewardPool
-	minerRewardPool := 0.0
+	var minerRewardPool protocol.Amount
 	if len(scored) > 1 {
-		workerReward = task.RewardPool * 0.8
+		workerReward = execution.ScaleAmount(task.RewardPool, 0.8)
 		minerRewardPool = task.RewardPool - workerReward
 	}
 
@@ -1312,7 +1312,7 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 
 	type roleCandidate struct {
 		Address    string
-		Balance    float64
+		Balance    protocol.Amount
 		Reputation float64
 	}
 
@@ -1455,7 +1455,7 @@ func (s *Store) computeProposalScoreTx(ctx context.Context, tx *sql.Tx, taskID s
 	return numerator / denominator, denominator, nil
 }
 
-func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID string, proposalID int64, round int, rewardPool float64) error {
+func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID string, proposalID int64, round int, rewardPool protocol.Amount) error {
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT v.voter, a.reputation
@@ -1509,8 +1509,37 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 		totalWeight = float64(len(miners))
 	}
 
+	type minerAllocation struct {
+		Agent     string
+		Base      protocol.Amount
+		Remainder float64
+	}
+	allocations := make([]minerAllocation, 0, len(miners))
+	remaining := rewardPool
 	for _, miner := range miners {
-		reward := rewardPool * (miner.Weight / totalWeight)
+		rawReward := float64(rewardPool) * (miner.Weight / totalWeight)
+		base := protocol.Amount(rawReward)
+		allocations = append(allocations, minerAllocation{
+			Agent:     miner.Agent,
+			Base:      base,
+			Remainder: rawReward - float64(base),
+		})
+		remaining -= base
+	}
+	sort.Slice(allocations, func(i, j int) bool {
+		if allocations[i].Remainder == allocations[j].Remainder {
+			return allocations[i].Agent < allocations[j].Agent
+		}
+		return allocations[i].Remainder > allocations[j].Remainder
+	})
+	for index := protocol.Amount(0); index < remaining; index++ {
+		allocations[int(index)%len(allocations)].Base++
+	}
+
+	for _, miner := range allocations {
+		if miner.Base <= 0 {
+			continue
+		}
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE agents
@@ -1518,7 +1547,7 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 			     reputation = $2,
 			     updated_at = NOW()
 			WHERE address = $3`,
-			reward,
+			miner.Base,
 			execution.BlendReputation(currentReputationTx(ctx, tx, miner.Agent), 1),
 			miner.Agent,
 		); err != nil {
