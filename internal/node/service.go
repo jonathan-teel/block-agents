@@ -31,6 +31,17 @@ func New(cfg config.Config) (*Service, error) {
 	}
 
 	peers := p2p.New(cfg.P2PListenAddr)
+	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	knownPeers, err := store.ListKnownPeers(loadCtx, 256)
+	if err == nil {
+		for _, peer := range knownPeers {
+			if peer.NodeID == cfg.NodeID {
+				continue
+			}
+			peers.RememberPeer(peer)
+		}
+	}
 	for _, seed := range cfg.SeedPeers {
 		peers.RememberPeer(protocol.PeerStatus{
 			NodeID:     seed,
@@ -65,6 +76,7 @@ func New(cfg config.Config) (*Service, error) {
 func (s *Service) Run(ctx context.Context) error {
 	go s.sequencer.Run(ctx)
 	go s.announceSelf(ctx)
+	go s.discoveryLoop(ctx)
 	go s.syncLoop(ctx)
 	go s.engine.RunTimeoutLoop(ctx)
 

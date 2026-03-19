@@ -96,6 +96,12 @@ func (m *Manager) BroadcastRoundChange(ctx context.Context, roundChange protocol
 	}
 }
 
+func (m *Manager) BroadcastCertifiedBlock(ctx context.Context, bundle protocol.CertifiedBlock) {
+	for _, peer := range m.Peers() {
+		_ = m.postJSON(ctx, peer.ListenAddr, "/v1/p2p/blocks/import", bundle)
+	}
+}
+
 func (m *Manager) ListenAddr() string {
 	return m.listenAddr
 }
@@ -106,6 +112,14 @@ func (m *Manager) FetchPeerStatus(ctx context.Context, baseURL string) (protocol
 		return protocol.PeerStatus{}, err
 	}
 	return status, nil
+}
+
+func (m *Manager) FetchPeers(ctx context.Context, baseURL string) ([]protocol.PeerStatus, error) {
+	peers := make([]protocol.PeerStatus, 0)
+	if err := m.getJSON(ctx, baseURL, "/v1/p2p/peers", &peers); err != nil {
+		return nil, err
+	}
+	return peers, nil
 }
 
 func (m *Manager) FetchCertifiedBlock(ctx context.Context, baseURL string, height int64) (protocol.CertifiedBlock, error) {
@@ -133,6 +147,15 @@ func (m *Manager) FetchCandidateBlock(ctx context.Context, baseURL string, hash 
 		return protocol.ConsensusCandidateBlock{}, err
 	}
 	return bundle, nil
+}
+
+func (m *Manager) FetchStateSnapshot(ctx context.Context, baseURL string, window int) (protocol.StateSnapshot, error) {
+	var snapshot protocol.StateSnapshot
+	path := "/v1/p2p/state/snapshot?window=" + strconv.Itoa(window)
+	if err := m.getJSON(ctx, baseURL, path, &snapshot); err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func (m *Manager) postJSON(ctx context.Context, baseURL string, path string, body any) error {

@@ -38,7 +38,7 @@ func (s *Store) GetAgent(ctx context.Context, address string) (protocol.Agent, e
 func (s *Store) ListOpenTasks(ctx context.Context) ([]protocol.Task, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE status = $1
 		 ORDER BY deadline ASC, created_at ASC`,
@@ -185,7 +185,7 @@ func (s *Store) getTask(ctx context.Context, querier interface {
 }, taskID string) (protocol.Task, error) {
 	task, err := scanTask(querier.QueryRowContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE id = $1`,
 		taskID,
@@ -454,6 +454,7 @@ func scanTask(scanner rowScanner) (protocol.Task, error) {
 		&task.Input.DebateRounds,
 		&task.Input.WorkerCount,
 		&task.Input.MinerCount,
+		&task.Input.RoleSelectionPolicy,
 		&task.RewardPool,
 		&task.MinStake,
 		&task.Status,
@@ -469,7 +470,7 @@ func scanTask(scanner rowScanner) (protocol.Task, error) {
 func getTaskForUpdate(ctx context.Context, tx *sql.Tx, taskID string) (protocol.Task, error) {
 	task, err := scanTask(tx.QueryRowContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE id = $1
 		 FOR UPDATE`,
@@ -571,7 +572,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	}
 
 	if err := appendStateRows(ctx, tx, &parts,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, reward_pool, min_stake, status
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status
 		 FROM tasks
 		 ORDER BY id ASC`,
 		func(rows *sql.Rows) (string, error) {
@@ -584,11 +585,12 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				debateRounds int
 				workerCount int
 				minerCount int
+				roleSelectionPolicy string
 				rewardPool float64
 				minStake   float64
 				status     string
 			)
-			if err := rows.Scan(&id, &creator, &taskType, &question, &deadline, &debateRounds, &workerCount, &minerCount, &rewardPool, &minStake, &status); err != nil {
+			if err := rows.Scan(&id, &creator, &taskType, &question, &deadline, &debateRounds, &workerCount, &minerCount, &roleSelectionPolicy, &rewardPool, &minStake, &status); err != nil {
 				return "", err
 			}
 			return strings.Join([]string{
@@ -601,6 +603,7 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				strconv.Itoa(debateRounds),
 				strconv.Itoa(workerCount),
 				strconv.Itoa(minerCount),
+				roleSelectionPolicy,
 				formatFloat(rewardPool),
 				formatFloat(minStake),
 				status,

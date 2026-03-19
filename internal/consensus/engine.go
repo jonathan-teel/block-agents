@@ -68,19 +68,34 @@ type Backend interface {
 	ChainStateReader
 }
 
+type ValidatorSetReader interface {
+	ListValidators(context.Context) ([]protocol.Validator, error)
+}
+
 type RecoveryReader interface {
 	ListQuorumCertificates(context.Context, int) ([]protocol.QuorumCertificate, error)
 	ListConsensusRoundChanges(context.Context, int) ([]protocol.ConsensusRoundChange, error)
+	ListForkChoicePreferences(context.Context, int) ([]protocol.ForkChoicePreference, error)
 }
 
 func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine, error) {
-	validators := make([]protocol.Validator, 0, len(cfg.Genesis.Validators))
-	for _, validator := range cfg.Genesis.Validators {
-		validators = append(validators, protocol.Validator{
-			Address:   validator.Address,
-			PublicKey: validator.PublicKey,
-			Power:     validator.Power,
-		})
+	validators := make([]protocol.Validator, 0)
+	if reader, ok := backend.(ValidatorSetReader); ok {
+		loaded, err := reader.ListValidators(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("load validator registry: %w", err)
+		}
+		validators = append(validators, loaded...)
+	}
+	if len(validators) == 0 {
+		validators = make([]protocol.Validator, 0, len(cfg.Genesis.Validators))
+		for _, validator := range cfg.Genesis.Validators {
+			validators = append(validators, protocol.Validator{
+				Address:   validator.Address,
+				PublicKey: validator.PublicKey,
+				Power:     validator.Power,
+			})
+		}
 	}
 	set := NewValidatorSet(validators)
 
@@ -579,6 +594,9 @@ func (e *Engine) commitCertifiedBlock(ctx context.Context, certificate protocol.
 	delete(e.observedAt, certificate.Height)
 	delete(e.currentRounds, certificate.Height)
 	e.mu.Unlock()
+	if e.peers != nil {
+		e.peers.BroadcastCertifiedBlock(ctx, bundle)
+	}
 	return nil
 }
 
@@ -645,6 +663,10 @@ func (e *Engine) recoverPersistentState(ctx context.Context, recovery RecoveryRe
 	if err != nil {
 		return fmt.Errorf("recover consensus round changes: %w", err)
 	}
+	preferences, err := recovery.ListForkChoicePreferences(ctx, 256)
+	if err != nil {
+		return fmt.Errorf("recover fork choice preferences: %w", err)
+	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -656,6 +678,9 @@ func (e *Engine) recoverPersistentState(ctx context.Context, recovery RecoveryRe
 		if !ok || betterCertificate(certificate, currentPreferred) {
 			e.preferredByHeight[certificate.Height] = certificate
 		}
+	}
+	for _, preference := range preferences {
+		e.preferredByHeight[preference.Height] = preference.Certificate
 	}
 
 	for _, message := range roundChanges {

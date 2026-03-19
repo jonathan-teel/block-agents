@@ -71,6 +71,10 @@ func (m *mockBackend) ListConsensusRoundChanges(_ context.Context, _ int) ([]pro
 	return append([]protocol.ConsensusRoundChange(nil), m.roundChanges...), nil
 }
 
+func (m *mockBackend) ListForkChoicePreferences(_ context.Context, _ int) ([]protocol.ForkChoicePreference, error) {
+	return nil, nil
+}
+
 func TestVoteTrackerFormsQuorumCertificate(t *testing.T) {
 	pub1, priv1, _ := ed25519.GenerateKey(nil)
 	pub2, priv2, _ := ed25519.GenerateKey(nil)

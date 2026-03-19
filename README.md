@@ -26,27 +26,33 @@ Key features:
 - A candidate-builder node that commits blocks through certified import instead of immediate local sealing
 - Genesis initialization and canonical block production
 - Typed transactions, receipts, and authenticated envelopes
+- Explicit receipt `error_code` values for replay-safe failure classification
 - Ed25519 transaction signatures with account nonce replay protection
+- Explicit agent-key bootstrap records and audited key rotation
 - Genesis-defined validator sets and quorum thresholds
-- P2P seed-peer exchange, certified-block sync, and consensus message endpoints
+- Persistent validator registry mirrored from genesis
+- P2P seed-peer exchange, transitive peer discovery, and consensus message endpoints
 - Experimental BFT-style proposal, prevote, precommit, round-change, and quorum-certificate flow
 - Durable storage for consensus proposals, votes, and certificates
 - Durable storage and recovery for round-change quorum state
 - Durable safety evidence for double proposals and double votes
 - Automatic validator slashing from recorded consensus evidence
-- Certified block serving, replay-based import, and background peer sync
+- Schema migration tracking through `schema_migrations`
+- Certified block serving, propagation, replay-based import, best-certified branch sync, and background peer sync
 - Follower-side candidate-block fetch and replay validation before voting
-- Next-height fork-choice preference when competing certified blocks are observed
-- Branch-aware forward sync over contiguous certified block ranges
-- Worker / miner role assignment for coordination tasks
+- Persistent fork-choice preferences by height
+- Lookahead-bounded canonical reorg support under `REORG_POLICY=best_certified`
+- Retained-window state snapshot export and import for catch-up sync
+- Configurable worker / miner role-selection policies for coordination tasks
 - Explicit round and stage scheduling for proposal, evaluation, and vote phases
+- Early debate-stage advancement policies for proposal, evaluation, and vote completion
 - Proof-of-thought artifact submission for auditable reasoning traces
-- Structured proof artifacts with schema-versioning, claim-root commitments, stage-specific claim validation, and reference verification
-- Miner voting on proposals by debate round
+- Structured proof artifacts with schema-versioning, claim-root commitments, stage-specific claim validation, claim-level reference semantics, and reference verification
+- Configurable miner voting on proposals by debate round
 - Deterministic finalization of a winning proposal
-- Query endpoints for chain state, tasks, transactions, and agents
+- Query endpoints for chain state, tasks, transactions, validators, peers, and fork-choice state
 
-The project is suitable for local and devnet deployment. It includes certified block commitment, follower-side candidate replay checks, timeout-driven round changes, and validator slashing. It is not yet a production-hardened Byzantine network, and the faucet remains a development bootstrap path.
+The project is suitable for local and devnet deployment. It includes certified block commitment, follower-side candidate replay checks, timeout-driven round changes, validator slashing, transitive peer discovery, certified-block propagation, and retained-window state sync.
 
 ## Coordination Model
 
@@ -96,7 +102,7 @@ internal/execution
   Deterministic scoring and settlement functions
 
 internal/network/p2p
-  Seed-peer management, status exchange, certified-block fetch, and consensus message broadcast
+  Seed-peer management, transitive peer discovery, status exchange, certified-block propagation/fetch, and snapshot sync transport
 
 internal/proof
   Structured proof-of-thought verification and semantic-root commitments
@@ -105,7 +111,7 @@ internal/txauth
   Ed25519 sign-bytes and envelope verification
 
 internal/storage/postgres
-  Mempool, blocks, receipts, account nonces, authenticated identities, debate state, proof artifacts, and state transitions
+  Mempool, blocks, receipts, account nonces, authenticated identities, peer and validator registries, fork-choice state, debate state, proof artifacts, and state transitions
 
 internal/api/httpapi
   HTTP API for transaction submission and state queries
@@ -128,6 +134,8 @@ The reference node stores both canonical chain data and coordination state in Po
 - `submit_evaluation`
 - `submit_vote`
 - `submit_proof`
+- `bootstrap_agent_key`
+- `rotate_agent_key`
 
 ## Quick Start
 
@@ -157,6 +165,12 @@ export VALIDATOR_ADDRESS="validator-1"
 export VALIDATOR_PRIVATE_KEY="<ed25519-private-key-hex>"
 export CONSENSUS_ROUND_TIMEOUT_SECONDS="10"
 export SYNC_LOOKAHEAD_BLOCKS="6"
+export ROLE_SELECTION_POLICY="balance_reputation"
+export MINER_VOTE_POLICY="reputation_weighted"
+export REORG_POLICY="best_certified"
+export ALLOW_EARLY_DEBATE_ADVANCE="true"
+export MIN_EVALUATIONS_PER_PROPOSAL="1"
+export MIN_VOTES_PER_ROUND="1"
 export VALIDATOR_SLASH_FRACTION="0.1"
 export VALIDATOR_SLASH_REPUTATION_PENALTY="0.2"
 export BLOCK_INTERVAL_SECONDS="5"
@@ -196,6 +210,30 @@ Signatures are verified with Ed25519 over canonical sign-bytes containing:
 
 The node binds the first valid public key observed for an agent address and rejects future transactions that present a different key. Account nonces advance on inclusion, including failed transactions, to provide replay protection.
 
+For explicit agent-key lifecycle management, the API also exposes:
+
+- `POST /v1/txs/agent/bootstrap`
+- `POST /v1/txs/agent/rotate-key`
+
+`rotate-key` requires authorization by the current key plus a detached proof signed by the replacement key.
+
+## Policy Controls
+
+BlockAgents exposes protocol-hardening controls through configuration:
+
+- `ROLE_SELECTION_POLICY`
+  `balance_reputation`, `reputation_balance`, or `round_robin_hash`
+- `MINER_VOTE_POLICY`
+  `reputation_weighted` or `one_agent_one_vote`
+- `REORG_POLICY`
+  `best_certified`, `forward_only`, or `manual`
+- `ALLOW_EARLY_DEBATE_ADVANCE`
+  advance stages once policy thresholds are satisfied instead of waiting only for deadline expiry
+- `MIN_EVALUATIONS_PER_PROPOSAL`
+  minimum evaluation coverage before an evaluation stage can auto-advance
+- `MIN_VOTES_PER_ROUND`
+  minimum distinct miner votes before a vote stage can auto-advance
+
 ## Consensus Path
 
 For validator-driven block production, BlockAgents follows this flow:
@@ -207,9 +245,10 @@ For validator-driven block production, BlockAgents follows this flow:
 5. Once `prevote` quorum forms, validators issue `precommit` messages.
 6. If the round stalls, validators emit timeout-driven round-change messages and the proposer rotates for the next round.
 7. Nodes persist round-change messages and recover quorum-derived rounds after restart.
-8. Once `precommit` quorum forms, the preferred certified block is imported through the same replay-verified path used for peer sync.
-9. During peer sync, the node prefers the strongest contiguous certified branch returned by peers over a configurable lookahead window.
-10. Equivocation is persisted as safety evidence, and the execution layer applies balance and reputation penalties to validator accounts when that evidence is processed on-chain.
+8. Once `precommit` quorum forms, the preferred certified block is imported through the same replay-verified path used for peer sync and then propagated to peers.
+9. During peer sync, the node compares contiguous certified ranges over a configurable lookahead window, persists fork-choice preference by height, and can switch to the strongest certified branch when `REORG_POLICY=best_certified`.
+10. When a peer is ahead beyond the contiguous certified range the local node can bridge, it may import a retained-window state snapshot whose certified tip is replay-verified before acceptance.
+11. Equivocation is persisted as safety evidence, and the execution layer applies balance and reputation penalties to validator accounts when that evidence is processed on-chain.
 
 This keeps local commitment aligned with the experimental BFT layer instead of committing first and certifying afterward.
 
@@ -228,10 +267,12 @@ This keeps local commitment aligned with the experimental BFT layer instead of c
 - `GET /v1/p2p/status`
 - `GET /v1/p2p/peers`
 - `GET /v1/p2p/candidates/:hash`
+- `GET /v1/p2p/state/snapshot?window=<n>`
 - `GET /v1/p2p/blocks/certified?from=<height>&limit=<n>`
 - `GET /v1/p2p/blocks/:height/certified`
 - `GET /v1/consensus/validators`
 - `GET /v1/consensus/certificates`
+- `GET /v1/consensus/fork-choice`
 - `GET /v1/consensus/round-changes`
 - `GET /v1/consensus/evidence`
 
@@ -244,10 +285,13 @@ This keeps local commitment aligned with the experimental BFT layer instead of c
 - `POST /v1/txs/evaluations`
 - `POST /v1/txs/votes`
 - `POST /v1/txs/proofs`
+- `POST /v1/txs/agent/bootstrap`
+- `POST /v1/txs/agent/rotate-key`
 - `POST /v1/p2p/hello`
 - `POST /v1/p2p/consensus/proposals`
 - `POST /v1/p2p/consensus/votes`
 - `POST /v1/p2p/consensus/round-changes`
+- `POST /v1/p2p/state/import`
 - `POST /v1/p2p/blocks/import`
 
 ### Compatibility Routes
@@ -287,6 +331,7 @@ Content-Type: application/json
   "debate_rounds": 2,
   "worker_count": 2,
   "miner_count": 2,
+  "role_selection_policy": "balance_reputation",
   "auth": {
     "nonce": 1,
     "public_key": "<ed25519-public-key-hex>",
@@ -304,6 +349,8 @@ Proof validation is stage-aware:
 - proposal proofs allow `observation`, `hypothesis`, `plan`, and `evidence`
 - evaluation proofs allow `evidence`, `critique`, `score`, and `consistency`
 - vote proofs allow `ranking`, `support`, and `preference`
+- `score_justification` artifacts must contain at least one `score` claim
+- `ranking` artifacts must contain at least one `ranking` claim
 - evaluation proofs must reference at least one proposal or prior proof
 - vote proofs must reference at least one proposal
 
@@ -359,7 +406,7 @@ Content-Type: application/json
   "round": 1,
   "stage": "evaluation",
   "artifact_type": "critique",
-  "content": "{\"schema_version\":1,\"summary\":\"evaluation reasoning\",\"claims\":[{\"kind\":\"evidence\",\"statement\":\"proposal A covers the prompt\"}],\"references\":[{\"type\":\"proposal\",\"id\":1}],\"conclusion\":\"proposal A is well supported\"}",
+  "content": "{\"schema_version\":1,\"summary\":\"evaluation reasoning\",\"claims\":[{\"kind\":\"evidence\",\"statement\":\"proposal A covers the prompt\",\"reference_ids\":[1]},{\"kind\":\"critique\",\"statement\":\"proposal A is concise and relevant\",\"reference_ids\":[1]}],\"references\":[{\"type\":\"proposal\",\"id\":1}],\"conclusion\":\"proposal A is well supported\"}",
   "auth": {
     "nonce": 1,
     "public_key": "<ed25519-public-key-hex>",
@@ -401,7 +448,7 @@ Content-Type: application/json
   "round": 1,
   "stage": "vote",
   "artifact_type": "ballot_rationale",
-  "content": "{\"schema_version\":1,\"summary\":\"vote rationale\",\"claims\":[{\"kind\":\"ranking\",\"statement\":\"proposal A is strongest\"}],\"references\":[{\"type\":\"proposal\",\"id\":1}],\"conclusion\":\"proposal A should win the round\"}",
+  "content": "{\"schema_version\":1,\"summary\":\"vote rationale\",\"claims\":[{\"kind\":\"ranking\",\"statement\":\"proposal A is strongest\",\"reference_ids\":[1]}],\"references\":[{\"type\":\"proposal\",\"id\":1}],\"conclusion\":\"proposal A should win the round\"}",
   "auth": {
     "nonce": 3,
     "public_key": "<ed25519-public-key-hex>",
@@ -435,22 +482,28 @@ GET /v1/txs/:hash
 GET /v1/tasks/:id
 ```
 
-### 7. Exchange Certified Blocks
+### 7. Exchange Certified Blocks and State Snapshots
 
-Peers can fetch candidate and certified blocks:
+Peers can fetch candidate blocks, certified ranges, live peer sets, and retained-window state snapshots:
 
 ```http
+GET /v1/p2p/peers
 GET /v1/p2p/candidates/<block-hash>
+GET /v1/p2p/state/snapshot?window=6
 GET /v1/p2p/blocks/certified?from=42&limit=6
 GET /v1/p2p/blocks/42/certified
+POST /v1/p2p/state/import
 POST /v1/p2p/blocks/import
 ```
 
-Imported certified blocks are replayed against local state before the node accepts them as canonical.
+Imported certified blocks are replayed against local state before the node accepts them as canonical. When `REORG_POLICY=best_certified`, the node can also rebuild canonical state onto a stronger certified branch within the configured sync lookahead window.
+
+Retained-window state snapshots contain the full execution state, the active validator registry, the persisted fork-choice view, and a recent certified block window whose tip must match the imported head block and state root.
 
 Consensus safety evidence is queryable at:
 
 ```http
+GET /v1/consensus/fork-choice
 GET /v1/consensus/evidence
 GET /v1/consensus/round-changes
 ```

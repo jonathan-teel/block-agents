@@ -72,6 +72,7 @@ func (s *Store) replayAndValidateBlockTx(ctx context.Context, tx *sql.Tx, meta c
 			receipt.Success = true
 			receipt.Events = events
 		} else {
+			receipt.ErrorCode = classifyErrorCode(execErr)
 			receipt.Error = execErr.Error()
 		}
 		computedReceipts = append(computedReceipts, receipt)
@@ -85,7 +86,7 @@ func (s *Store) replayAndValidateBlockTx(ctx context.Context, tx *sql.Tx, meta c
 	if err != nil {
 		return err
 	}
-	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, s.cfg.ValidatorSlashFraction, s.cfg.ValidatorSlashReputationPenalty)
+	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, nowUnix, s.cfg.ValidatorSlashFraction, s.cfg.ValidatorSlashReputationPenalty)
 	if err != nil {
 		return err
 	}
@@ -123,4 +124,3 @@ func (s *Store) replayAndValidateBlockTx(ctx context.Context, tx *sql.Tx, meta c
 
 	return nil
 }
-

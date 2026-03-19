@@ -152,6 +152,21 @@ func (h *Handler) ListPeers(c *gin.Context) {
 	c.JSON(http.StatusOK, h.peers.Peers())
 }
 
+func (h *Handler) ExportStateSnapshot(c *gin.Context) {
+	window, err := strconv.Atoi(c.DefaultQuery("window", strconv.Itoa(h.cfg.SyncLookaheadBlocks)))
+	if err != nil || window <= 0 || window > 256 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "window must be an integer between 1 and 256"})
+		return
+	}
+
+	snapshot, err := h.store.ExportStateSnapshot(c.Request.Context(), window)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, snapshot)
+}
+
 func (h *Handler) GetCandidateBlockByHash(c *gin.Context) {
 	if h.engine == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "consensus engine unavailable"})
@@ -172,6 +187,15 @@ func (h *Handler) ListCertificates(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, certificates)
+}
+
+func (h *Handler) ListForkChoice(c *gin.Context) {
+	preferences, err := h.store.ListForkChoicePreferences(c.Request.Context(), 256)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, preferences)
 }
 
 func (h *Handler) ListEvidence(c *gin.Context) {
@@ -219,23 +243,20 @@ func (h *Handler) GetCertifiedBlocksRange(c *gin.Context) {
 		return
 	}
 
-	bundles := make([]protocol.CertifiedBlock, 0, limit)
-	for height := from; height < from+int64(limit); height++ {
-		bundle, err := h.store.GetCertifiedBlockByHeight(c.Request.Context(), height)
-		if err != nil {
-			if errors.Is(err, postgres.ErrNotFound) {
-				break
-			}
-			writeError(c, err)
-			return
-		}
-		bundles = append(bundles, bundle)
+	bundles, err := h.store.ListCertifiedBlocksRange(c.Request.Context(), from, limit)
+	if err != nil {
+		writeError(c, err)
+		return
 	}
-
 	c.JSON(http.StatusOK, bundles)
 }
 
 func (h *Handler) ListValidators(c *gin.Context) {
+	validators, err := h.store.ListValidators(c.Request.Context())
+	if err == nil {
+		c.JSON(http.StatusOK, validators)
+		return
+	}
 	if h.engine == nil {
 		c.JSON(http.StatusOK, []protocol.Validator{})
 		return
@@ -250,13 +271,15 @@ func (h *Handler) PeerHello(c *gin.Context) {
 		return
 	}
 	if h.peers != nil {
-		h.peers.RememberPeer(protocol.PeerStatus{
+		status := protocol.PeerStatus{
 			NodeID:           hello.NodeID,
 			ChainID:          hello.ChainID,
 			ListenAddr:       hello.ListenAddr,
 			ValidatorAddress: hello.ValidatorAddress,
 			ObservedAt:       hello.SeenAt,
-		})
+		}
+		h.peers.RememberPeer(status)
+		_ = h.store.UpsertPeer(c.Request.Context(), status)
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "ok"})
 }
@@ -328,6 +351,29 @@ func (h *Handler) ImportCertifiedBlock(c *gin.Context) {
 		return
 	}
 	if err := h.store.ImportCertifiedBlock(c.Request.Context(), bundle); err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "imported"})
+}
+
+func (h *Handler) ImportStateSnapshot(c *gin.Context) {
+	var snapshot protocol.StateSnapshot
+	if err := c.ShouldBindJSON(&snapshot); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if h.engine == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "consensus engine unavailable"})
+		return
+	}
+	for _, bundle := range snapshot.CertifiedWindow {
+		if err := h.engine.VerifyCertifiedBlock(bundle); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err := h.store.ImportStateSnapshot(c.Request.Context(), snapshot); err != nil {
 		writeError(c, err)
 		return
 	}
@@ -446,29 +492,81 @@ func (h *Handler) FaucetGrant(c *gin.Context) {
 	c.JSON(http.StatusAccepted, status)
 }
 
+func (h *Handler) BootstrapAgentKeyTx(c *gin.Context) {
+	var req protocol.BootstrapAgentKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueBootstrapAgentKey(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) RotateAgentKeyTx(c *gin.Context) {
+	var req protocol.RotateAgentKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueRotateAgentKey(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
 func writeError(c *gin.Context, err error) {
+	errorCode := postgresErrorCode(err)
 	switch {
 	case errors.Is(err, postgres.ErrNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrValidation):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrInsufficientBalance):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrDuplicateSubmission):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrDuplicateTransaction):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrFaucetDisabled):
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrUnauthorized):
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "error_code": errorCode})
 	case errors.Is(err, postgres.ErrInvalidNonce):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "error_code": errorCode})
 	default:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "error_code": errorCode})
 	}
 }
 
 func nowUTC() time.Time {
 	return time.Now().UTC()
+}
+
+func postgresErrorCode(err error) string {
+	switch {
+	case errors.Is(err, postgres.ErrValidation):
+		return protocol.ReceiptCodeValidation
+	case errors.Is(err, postgres.ErrUnauthorized):
+		return protocol.ReceiptCodeUnauthorized
+	case errors.Is(err, postgres.ErrInvalidNonce):
+		return protocol.ReceiptCodeInvalidNonce
+	case errors.Is(err, postgres.ErrInsufficientBalance):
+		return protocol.ReceiptCodeInsufficientBalance
+	case errors.Is(err, postgres.ErrNotFound):
+		return protocol.ReceiptCodeNotFound
+	case errors.Is(err, postgres.ErrDuplicateSubmission), errors.Is(err, postgres.ErrDuplicateTransaction):
+		return protocol.ReceiptCodeConflict
+	default:
+		return protocol.ReceiptCodeInternal
+	}
 }

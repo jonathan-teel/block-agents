@@ -117,6 +117,10 @@ func (s *Store) GetChainInfo(ctx context.Context) (protocol.ChainInfo, error) {
 		HeadHeight:  meta.HeadHeight,
 		HeadHash:    meta.HeadHash,
 		GenesisHash: meta.GenesisHash,
+		SchemaVersion: s.schemaVersion,
+		RoleSelectionPolicy: s.cfg.RoleSelectionPolicy,
+		MinerVotePolicy: s.cfg.MinerVotePolicy,
+		ReorgPolicy: s.cfg.ReorgPolicy,
 	}, nil
 }
 
@@ -235,6 +239,7 @@ func (s *Store) GetTransactionStatus(ctx context.Context, txHash string) (protoc
 		signature   sql.NullString
 		payload     []byte
 		status      string
+		errorCode   sql.NullString
 		errorText   sql.NullString
 		blockHeight sql.NullInt64
 		acceptedAt  time.Time
@@ -243,12 +248,12 @@ func (s *Store) GetTransactionStatus(ctx context.Context, txHash string) (protoc
 
 	err := s.db.QueryRowContext(
 		ctx,
-		`SELECT p.tx_type, p.sender, p.nonce, p.public_key, p.signature, p.payload, p.status, p.error, p.block_height, p.accepted_at, bt.receipt_json
+		`SELECT p.tx_type, p.sender, p.nonce, p.public_key, p.signature, p.payload, p.status, p.error_code, p.error, p.block_height, p.accepted_at, bt.receipt_json
 		 FROM tx_pool p
 		 LEFT JOIN block_transactions bt ON bt.tx_hash = p.tx_hash
 		 WHERE p.tx_hash = $1`,
 		txHash,
-	).Scan(&txType, &sender, &nonce, &publicKey, &signature, &payload, &status, &errorText, &blockHeight, &acceptedAt, &receiptRaw)
+	).Scan(&txType, &sender, &nonce, &publicKey, &signature, &payload, &status, &errorCode, &errorText, &blockHeight, &acceptedAt, &receiptRaw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return protocol.TransactionStatus{}, ErrNotFound
@@ -272,6 +277,9 @@ func (s *Store) GetTransactionStatus(ctx context.Context, txHash string) (protoc
 
 	if errorText.Valid {
 		result.Error = errorText.String
+	}
+	if errorCode.Valid {
+		result.ErrorCode = errorCode.String
 	}
 	if blockHeight.Valid {
 		height := blockHeight.Int64
@@ -387,6 +395,7 @@ func buildCandidateBlockTx(ctx context.Context, tx *sql.Tx, meta chainMetadata, 
 			receipt.Success = true
 			receipt.Events = events
 		} else {
+			receipt.ErrorCode = classifyErrorCode(execErr)
 			receipt.Error = execErr.Error()
 		}
 		receipts = append(receipts, receipt)
@@ -400,7 +409,7 @@ func buildCandidateBlockTx(ctx context.Context, tx *sql.Tx, meta chainMetadata, 
 	if err != nil {
 		return nil, false, err
 	}
-	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, store.cfg.ValidatorSlashFraction, store.cfg.ValidatorSlashReputationPenalty)
+	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, opts.Now.Unix(), store.cfg.ValidatorSlashFraction, store.cfg.ValidatorSlashReputationPenalty)
 	if err != nil {
 		return nil, false, err
 	}
@@ -535,8 +544,8 @@ func insertBlockTx(ctx context.Context, tx *sql.Tx, block protocol.Block) error 
 
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO block_transactions (block_height, tx_index, tx_hash, tx_type, sender, nonce, public_key, signature, payload, success, error, receipt_json, accepted_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			`INSERT INTO block_transactions (block_height, tx_index, tx_hash, tx_type, sender, nonce, public_key, signature, payload, success, error_code, error, receipt_json, accepted_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 			block.Header.Height,
 			index,
 			transaction.Hash,
@@ -547,6 +556,7 @@ func insertBlockTx(ctx context.Context, tx *sql.Tx, block protocol.Block) error 
 			nullIfEmpty(transaction.Signature),
 			transaction.Payload,
 			block.Receipts[index].Success,
+			nullIfEmpty(block.Receipts[index].ErrorCode),
 			nullIfEmpty(block.Receipts[index].Error),
 			receiptJSON,
 			transaction.AcceptedAt,
@@ -566,10 +576,12 @@ func markTransactionsCommittedTx(ctx context.Context, tx *sql.Tx, block protocol
 			`UPDATE tx_pool
 			 SET status = 'committed',
 			     block_height = $2,
-			     error = $3
+			     error_code = $3,
+			     error = $4
 			 WHERE tx_hash = $1`,
 			transaction.Hash,
 			block.Header.Height,
+			nullIfEmpty(receipt.ErrorCode),
 			nullIfEmpty(receipt.Error),
 		); err != nil {
 			return fmt.Errorf("mark transaction committed: %w", err)

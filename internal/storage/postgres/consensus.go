@@ -146,6 +146,9 @@ func (s *Store) RecordQuorumCertificate(ctx context.Context, certificate protoco
 	if err != nil {
 		return fmt.Errorf("persist quorum certificate: %w", err)
 	}
+	if err := recordForkChoicePreference(ctx, s.db, certificate); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -273,6 +276,29 @@ func (s *Store) ListConsensusEvidence(ctx context.Context, limit int) ([]protoco
 	}
 
 	return evidence, nil
+}
+
+func (s *Store) ListCertifiedBlocksRange(ctx context.Context, from int64, limit int) ([]protocol.CertifiedBlock, error) {
+	if from < 0 {
+		return nil, fmt.Errorf("%w: from height must be non-negative", ErrValidation)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	bundles := make([]protocol.CertifiedBlock, 0, limit)
+	for height := from; height < from+int64(limit); height++ {
+		bundle, err := s.GetCertifiedBlockByHeight(ctx, height)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				break
+			}
+			return nil, err
+		}
+		bundles = append(bundles, bundle)
+	}
+
+	return bundles, nil
 }
 
 func (s *Store) GetCertifiedBlockByHeight(ctx context.Context, height int64) (protocol.CertifiedBlock, error) {

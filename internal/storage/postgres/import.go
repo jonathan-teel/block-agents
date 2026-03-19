@@ -11,40 +11,7 @@ import (
 )
 
 func (s *Store) ImportCertifiedBlock(ctx context.Context, bundle protocol.CertifiedBlock) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin import transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	meta, err := getMetadataForUpdate(ctx, tx)
-	if err != nil {
-		return err
-	}
-	if bundle.Block.Header.Height <= meta.HeadHeight {
-		return nil
-	}
-	if err := s.replayAndValidateBlockTx(ctx, tx, meta, bundle.Block); err != nil {
-		return err
-	}
-
-	if err := insertBlockTx(ctx, tx, bundle.Block); err != nil {
-		return err
-	}
-	if err := upsertCommittedTransactionsTx(ctx, tx, bundle.Block); err != nil {
-		return err
-	}
-	if err := updateMetadataHeadTx(ctx, tx, bundle.Block.Header.Height, bundle.Block.Hash); err != nil {
-		return err
-	}
-	if err := persistConsensusBundleTx(ctx, tx, bundle); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit import transaction: %w", err)
-	}
-	return nil
+	return s.ImportCertifiedBranch(ctx, []protocol.CertifiedBlock{bundle})
 }
 
 func upsertCommittedTransactionsTx(ctx context.Context, tx *sql.Tx, block protocol.Block) error {
@@ -55,10 +22,11 @@ func upsertCommittedTransactionsTx(ctx context.Context, tx *sql.Tx, block protoc
 		}
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO tx_pool (tx_hash, tx_type, sender, nonce, public_key, signature, payload, status, error, block_height, accepted_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'committed', $8, $9, $10)
+			`INSERT INTO tx_pool (tx_hash, tx_type, sender, nonce, public_key, signature, payload, status, error_code, error, block_height, accepted_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'committed', $8, $9, $10, $11)
 			 ON CONFLICT (tx_hash) DO UPDATE
 			 SET status = 'committed',
+			     error_code = EXCLUDED.error_code,
 			     error = EXCLUDED.error,
 			     block_height = EXCLUDED.block_height,
 			     accepted_at = EXCLUDED.accepted_at`,
@@ -69,6 +37,7 @@ func upsertCommittedTransactionsTx(ctx context.Context, tx *sql.Tx, block protoc
 			nullIfEmpty(transaction.PublicKey),
 			nullIfEmpty(transaction.Signature),
 			transaction.Payload,
+			nullIfEmpty(block.Receipts[index].ErrorCode),
 			nullIfEmpty(block.Receipts[index].Error),
 			block.Header.Height,
 			transaction.AcceptedAt,
@@ -190,6 +159,9 @@ func persistQuorumCertificateTx(ctx context.Context, tx *sql.Tx, certificate pro
 	if err != nil {
 		return fmt.Errorf("persist certificate bundle: %w", err)
 	}
+	if err := persistForkChoicePreferenceTx(ctx, tx, certificate); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -200,6 +172,7 @@ func receiptsEqual(left []protocol.Receipt, right []protocol.Receipt) bool {
 	for index := range left {
 		if left[index].TxHash != right[index].TxHash ||
 			left[index].Success != right[index].Success ||
+			left[index].ErrorCode != right[index].ErrorCode ||
 			left[index].Error != right[index].Error ||
 			!reflect.DeepEqual(left[index].Events, right[index].Events) {
 			return false

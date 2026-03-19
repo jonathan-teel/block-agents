@@ -22,6 +22,14 @@ const (
 
 	ConsensusEvidenceDoubleProposal = "double_proposal"
 	ConsensusEvidenceDoubleVote     = "double_vote"
+
+	ReceiptCodeValidation          = "validation_error"
+	ReceiptCodeUnauthorized        = "unauthorized"
+	ReceiptCodeInvalidNonce        = "invalid_nonce"
+	ReceiptCodeInsufficientBalance = "insufficient_balance"
+	ReceiptCodeNotFound            = "not_found"
+	ReceiptCodeConflict            = "conflict"
+	ReceiptCodeInternal            = "internal_error"
 )
 
 type TxType string
@@ -34,6 +42,8 @@ const (
 	TxTypeSubmitVote        TxType = "submit_vote"
 	TxTypeSubmitProof       TxType = "submit_proof"
 	TxTypeFundAgent         TxType = "fund_agent"
+	TxTypeBootstrapAgentKey TxType = "bootstrap_agent_key"
+	TxTypeRotateAgentKey    TxType = "rotate_agent_key"
 )
 
 type Genesis struct {
@@ -69,6 +79,7 @@ type TaskInput struct {
 	DebateRounds int    `json:"debate_rounds,omitempty"`
 	WorkerCount  int    `json:"worker_count,omitempty"`
 	MinerCount   int    `json:"miner_count,omitempty"`
+	RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
 }
 
 type Task struct {
@@ -303,6 +314,7 @@ type CreateTaskRequest struct {
 	DebateRounds int     `json:"debate_rounds,omitempty"`
 	WorkerCount  int     `json:"worker_count,omitempty"`
 	MinerCount   int     `json:"miner_count,omitempty"`
+	RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
 	Auth         TxAuth  `json:"auth"`
 }
 
@@ -361,6 +373,18 @@ type FundAgentRequest struct {
 	Auth   TxAuth  `json:"auth"`
 }
 
+type BootstrapAgentKeyRequest struct {
+	Agent string `json:"agent"`
+	Auth  TxAuth `json:"auth"`
+}
+
+type RotateAgentKeyRequest struct {
+	Agent        string `json:"agent"`
+	NewPublicKey string `json:"new_public_key"`
+	NewSignature string `json:"new_signature"`
+	Auth         TxAuth `json:"auth"`
+}
+
 type Transaction struct {
 	Hash       string          `json:"hash"`
 	Type       TxType          `json:"type"`
@@ -382,6 +406,7 @@ type Receipt struct {
 	TxHash      string  `json:"tx_hash"`
 	BlockHeight int64   `json:"block_height"`
 	Success     bool    `json:"success"`
+	ErrorCode   string  `json:"error_code,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	Events      []Event `json:"events,omitempty"`
 }
@@ -391,6 +416,7 @@ type TransactionStatus struct {
 	Status      string      `json:"status"`
 	BlockHeight *int64      `json:"block_height,omitempty"`
 	Receipt     *Receipt    `json:"receipt,omitempty"`
+	ErrorCode   string      `json:"error_code,omitempty"`
 	Error       string      `json:"error,omitempty"`
 }
 
@@ -420,7 +446,39 @@ type ChainInfo struct {
 	HeadHeight              int64  `json:"head_height"`
 	HeadHash                string `json:"head_hash"`
 	GenesisHash             string `json:"genesis_hash"`
+	SchemaVersion           int    `json:"schema_version"`
 	BlockIntervalSeconds    int64  `json:"block_interval_seconds"`
 	MaxTransactionsPerBlock int    `json:"max_transactions_per_block"`
 	FaucetEnabled           bool   `json:"faucet_enabled"`
+	RoleSelectionPolicy     string `json:"role_selection_policy,omitempty"`
+	MinerVotePolicy         string `json:"miner_vote_policy,omitempty"`
+	ReorgPolicy             string `json:"reorg_policy,omitempty"`
+}
+
+type ForkChoicePreference struct {
+	Height      int64             `json:"height"`
+	Certificate QuorumCertificate `json:"certificate"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+}
+
+type StateSnapshot struct {
+	ChainInfo           ChainInfo               `json:"chain_info"`
+	RetainedFromHeight  int64                   `json:"retained_from_height"`
+	HeadBlock           Block                   `json:"head_block"`
+	CertifiedWindow     []CertifiedBlock        `json:"certified_window,omitempty"`
+	Validators          []Validator             `json:"validators,omitempty"`
+	ForkChoice          []ForkChoicePreference  `json:"fork_choice,omitempty"`
+	Agents              []Agent                 `json:"agents,omitempty"`
+	Tasks               []Task                  `json:"tasks,omitempty"`
+	Assignments         []RoleAssignment        `json:"assignments,omitempty"`
+	DebateStates        []DebateState           `json:"debate_states,omitempty"`
+	Submissions         []Submission            `json:"submissions,omitempty"`
+	Proposals           []Proposal              `json:"proposals,omitempty"`
+	Evaluations         []ProposalEvaluation    `json:"evaluations,omitempty"`
+	Votes               []ProposalVote          `json:"votes,omitempty"`
+	Proofs              []ProofOfThought        `json:"proofs,omitempty"`
+	Results             []Result                `json:"results,omitempty"`
+	ConsensusEvidence   []ConsensusEvidence     `json:"consensus_evidence,omitempty"`
+	ConsensusRounds     []ConsensusRoundChange  `json:"consensus_round_changes,omitempty"`
+	ExportedAt          time.Time               `json:"exported_at"`
 }

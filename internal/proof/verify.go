@@ -18,9 +18,10 @@ type Document struct {
 }
 
 type Claim struct {
-	Kind      string `json:"kind"`
-	Statement string `json:"statement"`
-	Digest    string `json:"digest"`
+	Kind         string  `json:"kind"`
+	Statement    string  `json:"statement"`
+	ReferenceIDs []int64 `json:"reference_ids,omitempty"`
+	Digest       string  `json:"digest"`
 }
 
 type Reference struct {
@@ -87,7 +88,6 @@ func parseDocument(stage string, artifactType string, content string) (Document,
 	for index := range document.Claims {
 		document.Claims[index].Kind = strings.ToLower(strings.TrimSpace(document.Claims[index].Kind))
 		document.Claims[index].Statement = strings.TrimSpace(document.Claims[index].Statement)
-		document.Claims[index].Digest = protocol.HashStrings([]string{document.Claims[index].Kind, document.Claims[index].Statement})
 
 		if document.Claims[index].Kind == "" {
 			return Document{}, fmt.Errorf("claim %d kind is required", index)
@@ -98,6 +98,22 @@ func parseDocument(stage string, artifactType string, content string) (Document,
 		if !isAllowedClaimKind(stage, document.Claims[index].Kind) {
 			return Document{}, fmt.Errorf("claim %d kind %s is not allowed for stage %s", index, document.Claims[index].Kind, stage)
 		}
+		sort.Slice(document.Claims[index].ReferenceIDs, func(i, j int) bool {
+			return document.Claims[index].ReferenceIDs[i] < document.Claims[index].ReferenceIDs[j]
+		})
+		for refIndex, referenceID := range document.Claims[index].ReferenceIDs {
+			if referenceID <= 0 {
+				return Document{}, fmt.Errorf("claim %d reference_ids[%d] must be > 0", index, refIndex)
+			}
+			if refIndex > 0 && document.Claims[index].ReferenceIDs[refIndex-1] == referenceID {
+				return Document{}, fmt.Errorf("claim %d reference_ids must be unique", index)
+			}
+		}
+		document.Claims[index].Digest = protocol.HashStrings([]string{
+			document.Claims[index].Kind,
+			document.Claims[index].Statement,
+			int64SliceDigest(document.Claims[index].ReferenceIDs),
+		})
 	}
 	sort.Slice(document.Claims, func(i, j int) bool {
 		if document.Claims[i].Digest == document.Claims[j].Digest {
@@ -138,6 +154,12 @@ func parseDocument(stage string, artifactType string, content string) (Document,
 	}
 	if stage == protocol.DebateStageVote && len(document.References) == 0 {
 		return Document{}, fmt.Errorf("vote-stage proofs require at least one reference")
+	}
+	if err := validateClaimReferenceBindings(document.Claims, document.References); err != nil {
+		return Document{}, err
+	}
+	if err := validateClaimReferenceSemantics(stage, document); err != nil {
+		return Document{}, err
 	}
 	if err := validateStageSemantics(stage, artifactType, document); err != nil {
 		return Document{}, err
@@ -217,6 +239,15 @@ func isAllowedClaimKind(stage string, kind string) bool {
 func validateStageSemantics(stage string, artifactType string, document Document) error {
 	switch stage {
 	case protocol.DebateStageProposal:
+		if artifactType == "plan" && !hasClaimKind(document.Claims, "plan") {
+			return fmt.Errorf("proposal plan artifacts must include at least one plan claim")
+		}
+		if artifactType == "evidence" && !hasClaimKind(document.Claims, "evidence") {
+			return fmt.Errorf("proposal evidence artifacts must include at least one evidence claim")
+		}
+		if hasClaimKind(document.Claims, "evidence") && !hasClaimReferenceKind(document.Claims, "evidence") {
+			return fmt.Errorf("proposal evidence claims must bind to reference_ids")
+		}
 		if artifactType == "evidence" && len(document.References) == 0 {
 			return fmt.Errorf("proposal evidence artifacts require at least one reference")
 		}
@@ -225,8 +256,23 @@ func validateStageSemantics(stage string, artifactType string, document Document
 			"proof":    {},
 		})
 	case protocol.DebateStageEvaluation:
+		if artifactType == "critique" && !hasClaimKind(document.Claims, "critique") && !hasClaimKind(document.Claims, "consistency") {
+			return fmt.Errorf("evaluation critique artifacts must include critique or consistency claims")
+		}
+		if artifactType == "evidence" && !hasClaimKind(document.Claims, "evidence") {
+			return fmt.Errorf("evaluation evidence artifacts must include at least one evidence claim")
+		}
+		if artifactType == "score_justification" && !hasClaimKind(document.Claims, "score") {
+			return fmt.Errorf("score_justification artifacts must include at least one score claim")
+		}
 		if !hasClaimKind(document.Claims, "evidence") && !hasClaimKind(document.Claims, "critique") && !hasClaimKind(document.Claims, "score") {
 			return fmt.Errorf("evaluation-stage proofs must include evidence, critique, or score claims")
+		}
+		if hasClaimKind(document.Claims, "evidence") && !hasClaimReferenceKind(document.Claims, "evidence") {
+			return fmt.Errorf("evaluation evidence claims must bind to reference_ids")
+		}
+		if hasClaimKind(document.Claims, "score") && !hasClaimReferenceKind(document.Claims, "score") {
+			return fmt.Errorf("evaluation score claims must bind to reference_ids")
 		}
 		if err := validateReferenceTypes(document.References, map[string]struct{}{
 			"proposal": {},
@@ -239,8 +285,15 @@ func validateStageSemantics(stage string, artifactType string, document Document
 		}
 		return nil
 	case protocol.DebateStageVote:
+		if artifactType == "ranking" && !hasClaimKind(document.Claims, "ranking") {
+			return fmt.Errorf("vote ranking artifacts must include at least one ranking claim")
+		}
 		if !hasClaimKind(document.Claims, "ranking") && !hasClaimKind(document.Claims, "support") && !hasClaimKind(document.Claims, "preference") {
 			return fmt.Errorf("vote-stage proofs must include ranking, support, or preference claims")
+		}
+		if (hasClaimKind(document.Claims, "ranking") || hasClaimKind(document.Claims, "support") || hasClaimKind(document.Claims, "preference")) &&
+			!(hasClaimReferenceKind(document.Claims, "ranking") || hasClaimReferenceKind(document.Claims, "support") || hasClaimReferenceKind(document.Claims, "preference")) {
+			return fmt.Errorf("vote-stage ranking claims must bind to reference_ids")
 		}
 		if err := validateReferenceTypes(document.References, map[string]struct{}{
 			"proposal":   {},
@@ -256,6 +309,62 @@ func validateStageSemantics(stage string, artifactType string, document Document
 	default:
 		return fmt.Errorf("unsupported debate stage %s", stage)
 	}
+}
+
+func validateClaimReferenceSemantics(stage string, document Document) error {
+	if len(document.Claims) == 0 || len(document.References) == 0 {
+		return nil
+	}
+
+	referencesByID := make(map[int64]Reference, len(document.References))
+	for _, reference := range document.References {
+		referencesByID[reference.ID] = reference
+	}
+
+	for index, claim := range document.Claims {
+		switch stage {
+		case protocol.DebateStageProposal:
+			if claim.Kind == "evidence" {
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "proof"); err != nil {
+					return err
+				}
+			}
+		case protocol.DebateStageEvaluation:
+			switch claim.Kind {
+			case "evidence", "critique":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "proof"); err != nil {
+					return err
+				}
+			case "score":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal"); err != nil {
+					return err
+				}
+			case "consistency":
+				if len(claim.ReferenceIDs) < 2 {
+					return fmt.Errorf("evaluation consistency claims must bind at least two references")
+				}
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "proof"); err != nil {
+					return err
+				}
+			}
+		case protocol.DebateStageVote:
+			switch claim.Kind {
+			case "ranking":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal"); err != nil {
+					return err
+				}
+			case "support", "preference":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "evaluation", "proof"); err != nil {
+					return err
+				}
+				if !claimHasReferenceType(claim, referencesByID, "proposal") {
+					return fmt.Errorf("vote %s claims must bind at least one proposal reference", claim.Kind)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func validateReferenceTypes(references []Reference, allowed map[string]struct{}) error {
@@ -276,6 +385,15 @@ func hasClaimKind(claims []Claim, kind string) bool {
 	return false
 }
 
+func hasClaimReferenceKind(claims []Claim, kind string) bool {
+	for _, claim := range claims {
+		if claim.Kind == kind && len(claim.ReferenceIDs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func hasReferenceType(references []Reference, referenceType string) bool {
 	for _, reference := range references {
 		if reference.Type == referenceType {
@@ -283,4 +401,73 @@ func hasReferenceType(references []Reference, referenceType string) bool {
 		}
 	}
 	return false
+}
+
+func validateClaimReferenceBindings(claims []Claim, references []Reference) error {
+	if len(claims) == 0 {
+		return nil
+	}
+	if len(references) == 0 {
+		for index, claim := range claims {
+			if len(claim.ReferenceIDs) > 0 {
+				return fmt.Errorf("claim %d references unknown reference ids", index)
+			}
+		}
+		return nil
+	}
+	allowed := make(map[int64]struct{}, len(references))
+	for _, reference := range references {
+		allowed[reference.ID] = struct{}{}
+	}
+	for index, claim := range claims {
+		for _, referenceID := range claim.ReferenceIDs {
+			if _, ok := allowed[referenceID]; !ok {
+				return fmt.Errorf("claim %d references unknown reference id %d", index, referenceID)
+			}
+		}
+	}
+	return nil
+}
+
+func requireClaimReferenceTypes(index int, claim Claim, referencesByID map[int64]Reference, allowedTypes ...string) error {
+	if len(claim.ReferenceIDs) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]struct{}, len(allowedTypes))
+	for _, value := range allowedTypes {
+		allowed[value] = struct{}{}
+	}
+
+	for _, referenceID := range claim.ReferenceIDs {
+		reference, ok := referencesByID[referenceID]
+		if !ok {
+			return fmt.Errorf("claim %d references unknown reference id %d", index, referenceID)
+		}
+		if _, ok := allowed[reference.Type]; !ok {
+			return fmt.Errorf("claim %d kind %s cannot bind reference type %s", index, claim.Kind, reference.Type)
+		}
+	}
+	return nil
+}
+
+func claimHasReferenceType(claim Claim, referencesByID map[int64]Reference, referenceType string) bool {
+	for _, referenceID := range claim.ReferenceIDs {
+		reference, ok := referencesByID[referenceID]
+		if ok && reference.Type == referenceType {
+			return true
+		}
+	}
+	return false
+}
+
+func int64SliceDigest(values []int64) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprintf("%d", value))
+	}
+	return strings.Join(parts, ",")
 }

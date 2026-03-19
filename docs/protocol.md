@@ -15,6 +15,8 @@ The main workflow is inspired by blockchain-mediated LLM coordination systems:
 - miner agents vote on proposals by debate round
 - the chain finalizes a winning proposal and distributes rewards
 
+On the networking side, nodes exchange peer status, discover additional peers from known peers, propagate certified blocks, and fall back to retained-window state snapshots when a node is too far behind to catch up only from contiguous certified ranges.
+
 The legacy `prediction` mode remains available, but the primary protocol direction is the `blockagents` task model.
 
 ## Task Types
@@ -30,6 +32,7 @@ A coordination task with:
 - `debate_rounds`
 - `worker_count`
 - `miner_count`
+- `role_selection_policy`
 
 ### `prediction`
 
@@ -45,7 +48,7 @@ Workers submit candidate answers or proposals for a task round.
 
 Miners evaluate worker proposals and contribute to canonical finalization.
 
-In the reference client, miners and workers are assigned deterministically from available funded agents when a `blockagents` task is created.
+In the reference client, miners and workers are assigned deterministically from available funded agents when a `blockagents` task is created. The assignment order is controlled by `role_selection_policy`.
 
 ## Chain Objects
 
@@ -76,6 +79,8 @@ The sign-bytes are the canonical JSON encoding of:
 
 The transaction hash is derived from the envelope fields and payload. Unsigned dev-faucet transactions remain allowed on devnet and include `accepted_at` in the hash to preserve uniqueness.
 
+The first valid authenticated envelope for an address binds that address to a public key. Subsequent authenticated envelopes must use the bound key unless the address rotates keys through `rotate_agent_key`.
+
 ### Receipt
 
 Every included transaction receives a receipt with:
@@ -83,6 +88,7 @@ Every included transaction receives a receipt with:
 - `tx_hash`
 - `block_height`
 - `success`
+- `error_code`
 - `error`
 - `events`
 
@@ -108,6 +114,8 @@ Quorum is calculated as:
 ```text
 floor((2 * total_voting_power) / 3) + 1
 ```
+
+The reference node mirrors the active validator set into a persistent `validator_registry` so it can be queried, exported in snapshots, and reused when consensus state is recovered after restart.
 
 ### Consensus Messages
 
@@ -135,8 +143,10 @@ The current devnet flow is:
 5. once `prevote` quorum forms, validators issue `precommit`
 6. if the round stalls, validators emit signed `ConsensusRoundChange` messages and proposer selection advances to the next round after quorum
 7. round-change messages are persisted so quorum-derived round state can be recovered after restart
-8. once `precommit` quorum forms, the preferred certified block is imported into canonical state
-9. during peer sync, nodes compare contiguous certified ranges and prefer the strongest forward branch over a configurable lookahead window
+8. once `precommit` quorum forms, the preferred certified block is imported into canonical state and propagated to peers
+9. during peer sync, nodes compare contiguous certified ranges, persist per-height fork-choice preferences, and prefer the strongest certified branch over a configurable lookahead window
+10. under `REORG_POLICY=best_certified`, nodes may replace the canonical suffix with a stronger certified branch inside that lookahead window
+11. if a peer is ahead beyond the local contiguous certified window, the node may import a retained-window state snapshot whose certified tip is verified before acceptance
 
 Equivocation is tracked as consensus evidence when a validator:
 
@@ -163,6 +173,38 @@ Importing nodes:
 5. compare receipts, events, and state commitments
 6. accept the block only if replay is identical
 
+When the imported branch diverges from the current head and reorg policy permits it, the node rebuilds canonical execution state from genesis through the retained prefix and then imports the stronger certified suffix.
+
+Certified blocks are available over:
+
+- `GET /v1/p2p/blocks/certified?from=<height>&limit=<n>`
+- `GET /v1/p2p/blocks/:height/certified`
+- `POST /v1/p2p/blocks/import`
+
+### State Snapshot Sync
+
+For catch-up scenarios beyond the local contiguous certified window, a node may export or import a retained-window `StateSnapshot`.
+
+A snapshot contains:
+
+- current `ChainInfo`
+- the imported `HeadBlock`
+- a recent `CertifiedWindow`
+- the active validator registry
+- persisted fork-choice preferences
+- the full execution state for agents, tasks, roles, debate stages, proposals, evaluations, votes, proofs, and results
+- persisted consensus evidence and round changes
+
+Snapshot acceptance rules:
+
+1. `chain_id` must match the local chain
+2. the head block hash must match its header
+3. the certified window must be contiguous and end at the advertised head block
+4. every certified bundle in the retained window must pass quorum and signature verification
+5. after import, the local state root recomputed from imported execution state must match the advertised head state root
+
+The snapshot path is intended for devnet catch-up and bounded recovery. It does not implement trust-minimized production state sync.
+
 ## Transaction Types
 
 ### `fund_agent`
@@ -171,11 +213,35 @@ Funds an agent account on devnet from the configured faucet account.
 
 This is the only unsigned transaction path in the reference node and is intended strictly for local development bootstrap.
 
+### `bootstrap_agent_key`
+
+Records an explicit on-chain bootstrap event for an agent key that has already been bound through the authenticated envelope path.
+
+This transaction is primarily an audit artifact. The first valid signed transaction for an address still establishes the bound public key.
+
+### `rotate_agent_key`
+
+Rotates an agent public key.
+
+Execution rules:
+
+- the transaction must be authorized by the currently bound public key
+- `new_public_key` must differ from the current public key
+- `new_signature` must prove possession of the replacement key over the rotation sign-bytes
+- successful rotations are recorded in `agent_key_rotations`
+
 ### `create_task`
 
 Creates either a `blockagents` or `prediction` task.
 
 For `blockagents` tasks, the chain also assigns worker and miner roles at execution time.
+
+Relevant creation-time policy fields:
+
+- `role_selection_policy`
+- `debate_rounds`
+- `worker_count`
+- `miner_count`
 
 ### `submit_proposal`
 
@@ -323,6 +389,15 @@ Claim kinds are stage-scoped:
 - evaluation: `evidence`, `critique`, `score`, `consistency`
 - vote: `ranking`, `support`, `preference`
 
+Artifact types also carry semantic requirements:
+
+- proposal `plan` artifacts must include a `plan` claim
+- proposal `evidence` artifacts must include an `evidence` claim
+- evaluation `critique` artifacts must include `critique` or `consistency`
+- evaluation `evidence` artifacts must include `evidence`
+- evaluation `score_justification` artifacts must include `score`
+- vote `ranking` artifacts must include `ranking`
+
 Reference digests are resolved against on-chain proposals, evaluations, votes, or prior proofs before insertion.
 
 Reference rules:
@@ -330,6 +405,11 @@ Reference rules:
 - proposal-stage `evidence` artifacts require references
 - evaluation-stage artifacts require references and must reference at least one proposal or proof
 - vote-stage artifacts require references and must reference at least one proposal
+- claim-level `reference_ids` must resolve inside the document `references[]` set
+- evaluation `score` claims may only bind proposal references
+- evaluation `consistency` claims must bind at least two references
+- vote `ranking` claims may only bind proposal references
+- vote `support` and `preference` claims must bind at least one proposal reference
 
 Proof claims and references must remain unique under canonical hashing.
 
@@ -362,9 +442,10 @@ proposal_score = sum(overall_score * evaluator_reputation) / sum(evaluator_reput
 The winning proposal is selected from the latest debate round:
 
 ```text
-1. highest miner vote count
-2. highest evaluation score
-3. highest evaluation weight
+1. highest miner vote power
+2. highest raw miner vote count
+3. highest evaluation score
+4. highest evaluation weight
 ```
 
 ### Reward Distribution
@@ -372,7 +453,7 @@ The winning proposal is selected from the latest debate round:
 In the reference client:
 
 - the winning worker receives the majority of the reward pool
-- miners who voted for the winning proposal share the remaining miner reward pool
+- miners who voted for the winning proposal share the remaining miner reward pool according to `MINER_VOTE_POLICY`
 
 This is a practical first implementation of miner/worker incentives, not the final economic design.
 
@@ -407,6 +488,7 @@ The reference client does not yet implement:
 
 - full cryptographic proof-of-thought semantic truth verification
 - full paper-level byzantine protocol semantics
-- deep multi-branch fork-choice with canonical reorg handling
+- unbounded deep fork-choice and canonical reorg handling across long-lived branches
+- trust-minimized production state sync
 
 Those are roadmap items, not hidden assumptions.

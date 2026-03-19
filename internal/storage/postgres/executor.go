@@ -4,12 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	"aichain/internal/execution"
 	"aichain/internal/proof"
 	"aichain/internal/protocol"
+	"aichain/internal/txauth"
 
 	"github.com/google/uuid"
 )
@@ -58,6 +62,10 @@ func (s *Store) executeTransaction(ctx context.Context, tx *sql.Tx, pending pend
 		return s.executeProofTx(ctx, tx, pending, nowUnix)
 	case protocol.TxTypeFundAgent:
 		return s.executeFundAgentTx(ctx, tx, pending)
+	case protocol.TxTypeBootstrapAgentKey:
+		return s.executeBootstrapAgentKeyTx(ctx, tx, pending)
+	case protocol.TxTypeRotateAgentKey:
+		return s.executeRotateAgentKeyTx(ctx, tx, pending)
 	default:
 		return nil, fmt.Errorf("unsupported transaction type %q", pending.Type)
 	}
@@ -73,6 +81,9 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 	}
 	if payload.Type == "" {
 		payload.Type = protocol.TaskTypePrediction
+	}
+	if payload.RoleSelectionPolicy == "" {
+		payload.RoleSelectionPolicy = s.cfg.RoleSelectionPolicy
 	}
 
 	if payload.Deadline <= nowUnix {
@@ -102,8 +113,8 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 	taskID := uuid.NewString()
 	if _, err := tx.ExecContext(
 		ctx,
-		`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, reward_pool, min_stake, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		taskID,
 		payload.Creator,
 		payload.Type,
@@ -112,6 +123,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 		maxInt(payload.DebateRounds, 1),
 		payload.WorkerCount,
 		payload.MinerCount,
+		payload.RoleSelectionPolicy,
 		payload.RewardPool,
 		payload.MinStake,
 		protocol.StatusOpen,
@@ -129,6 +141,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 			DebateRounds: maxInt(payload.DebateRounds, 1),
 			WorkerCount:  payload.WorkerCount,
 			MinerCount:   payload.MinerCount,
+			RoleSelectionPolicy: payload.RoleSelectionPolicy,
 		},
 		RewardPool: payload.RewardPool,
 		MinStake:   payload.MinStake,
@@ -144,6 +157,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 				"task_type":   payload.Type,
 				"reward_pool": formatFloat(payload.RewardPool),
 				"deadline":    strconv.FormatInt(payload.Deadline, 10),
+				"role_selection_policy": payload.RoleSelectionPolicy,
 			},
 		},
 	}
@@ -152,7 +166,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 		if err := initializeDebateStateTx(ctx, tx, task, nowUnix); err != nil {
 			return nil, err
 		}
-		assignmentEvents, err := s.assignTaskRolesTx(ctx, tx, taskID, payload.Creator, payload.WorkerCount, payload.MinerCount)
+		assignmentEvents, err := s.assignTaskRolesTx(ctx, tx, taskID, payload.Creator, payload.WorkerCount, payload.MinerCount, payload.RoleSelectionPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -289,7 +303,7 @@ func (s *Store) executeProposalTx(ctx context.Context, tx *sql.Tx, pending pendi
 		return nil, fmt.Errorf("insert proposal: %w", err)
 	}
 
-	return []protocol.Event{
+	events := []protocol.Event{
 		{
 			Type: "proposal.submitted",
 			Attributes: map[string]string{
@@ -299,7 +313,16 @@ func (s *Store) executeProposalTx(ctx context.Context, tx *sql.Tx, pending pendi
 				"round":       strconv.Itoa(payload.Round),
 			},
 		},
-	}, nil
+	}
+	if s.cfg.AllowEarlyDebateAdvance {
+		advanceEvents, err := s.maybeAdvanceDebateStateTx(ctx, tx, task, nowUnix)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, advanceEvents...)
+	}
+
+	return events, nil
 }
 
 func (s *Store) executeEvaluationTx(ctx context.Context, tx *sql.Tx, pending pendingTx, nowUnix int64) ([]protocol.Event, error) {
@@ -383,7 +406,7 @@ func (s *Store) executeEvaluationTx(ctx context.Context, tx *sql.Tx, pending pen
 		return nil, fmt.Errorf("insert evaluation: %w", err)
 	}
 
-	return []protocol.Event{
+	events := []protocol.Event{
 		{
 			Type: "evaluation.submitted",
 			Attributes: map[string]string{
@@ -394,7 +417,16 @@ func (s *Store) executeEvaluationTx(ctx context.Context, tx *sql.Tx, pending pen
 				"overall_score": formatFloat(overallScore),
 			},
 		},
-	}, nil
+	}
+	if s.cfg.AllowEarlyDebateAdvance {
+		advanceEvents, err := s.maybeAdvanceDebateStateTx(ctx, tx, task, nowUnix)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, advanceEvents...)
+	}
+
+	return events, nil
 }
 
 func (s *Store) executeVoteTx(ctx context.Context, tx *sql.Tx, pending pendingTx, nowUnix int64) ([]protocol.Event, error) {
@@ -470,7 +502,7 @@ func (s *Store) executeVoteTx(ctx context.Context, tx *sql.Tx, pending pendingTx
 		return nil, fmt.Errorf("insert vote: %w", err)
 	}
 
-	return []protocol.Event{
+	events := []protocol.Event{
 		{
 			Type: "vote.submitted",
 			Attributes: map[string]string{
@@ -480,7 +512,16 @@ func (s *Store) executeVoteTx(ctx context.Context, tx *sql.Tx, pending pendingTx
 				"round":       strconv.Itoa(payload.Round),
 			},
 		},
-	}, nil
+	}
+	if s.cfg.AllowEarlyDebateAdvance {
+		advanceEvents, err := s.maybeAdvanceDebateStateTx(ctx, tx, task, nowUnix)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, advanceEvents...)
+	}
+
+	return events, nil
 }
 
 func (s *Store) executeProofTx(ctx context.Context, tx *sql.Tx, pending pendingTx, nowUnix int64) ([]protocol.Event, error) {
@@ -645,6 +686,105 @@ func (s *Store) executeFundAgentTx(ctx context.Context, tx *sql.Tx, pending pend
 			Attributes: map[string]string{
 				"agent":  payload.Agent,
 				"amount": formatFloat(payload.Amount),
+			},
+		},
+	}, nil
+}
+
+func (s *Store) executeBootstrapAgentKeyTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
+	var payload protocol.BootstrapAgentKeyRequest
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode bootstrap_agent_key payload: %w", err)
+	}
+	if pending.Sender != payload.Agent {
+		return nil, fmt.Errorf("%w: sender does not match agent", ErrValidation)
+	}
+
+	state, err := lookupAuthStateForUpdate(ctx, tx, payload.Agent)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if !state.PublicKey.Valid || state.PublicKey.String == "" {
+		return nil, fmt.Errorf("%w: agent key bootstrap requires a bound public key", ErrValidation)
+	}
+
+	return []protocol.Event{
+		{
+			Type: "agent.key_bootstrapped",
+			Attributes: map[string]string{
+				"agent":      payload.Agent,
+				"public_key": pending.PublicKey,
+			},
+		},
+	}, nil
+}
+
+func (s *Store) executeRotateAgentKeyTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
+	var payload protocol.RotateAgentKeyRequest
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode rotate_agent_key payload: %w", err)
+	}
+	if pending.Sender != payload.Agent {
+		return nil, fmt.Errorf("%w: sender does not match agent", ErrValidation)
+	}
+
+	state, err := lookupAuthStateForUpdate(ctx, tx, payload.Agent)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if !state.PublicKey.Valid || state.PublicKey.String == "" {
+		return nil, fmt.Errorf("%w: agent must bootstrap a key before rotation", ErrValidation)
+	}
+	oldPublicKey := txauth.NormalizePublicKey(state.PublicKey.String)
+	if oldPublicKey != pending.PublicKey {
+		return nil, fmt.Errorf("%w: rotation must be authorized by the current public key", ErrUnauthorized)
+	}
+	if payload.NewPublicKey == "" || payload.NewSignature == "" {
+		return nil, fmt.Errorf("%w: new_public_key and new_signature are required", ErrValidation)
+	}
+	if payload.NewPublicKey == oldPublicKey {
+		return nil, fmt.Errorf("%w: new_public_key must differ from current public key", ErrValidation)
+	}
+	if err := txauth.VerifyRotationProof(s.cfg.Genesis.ChainID, payload.Agent, oldPublicKey, payload.NewPublicKey, pending.Nonce, payload.NewSignature); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE agents
+		 SET public_key = $2,
+		     updated_at = NOW()
+		 WHERE address = $1`,
+		payload.Agent,
+		payload.NewPublicKey,
+	); err != nil {
+		return nil, fmt.Errorf("rotate agent public key: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO agent_key_rotations (agent, old_public_key, new_public_key, tx_hash, rotated_at)
+		 VALUES ($1, $2, $3, $4, NOW())`,
+		payload.Agent,
+		oldPublicKey,
+		payload.NewPublicKey,
+		pending.Hash,
+	); err != nil {
+		return nil, fmt.Errorf("record agent key rotation: %w", err)
+	}
+
+	return []protocol.Event{
+		{
+			Type: "agent.key_rotated",
+			Attributes: map[string]string{
+				"agent":          payload.Agent,
+				"old_public_key": oldPublicKey,
+				"new_public_key": payload.NewPublicKey,
 			},
 		},
 	}, nil
@@ -888,6 +1028,7 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 		Score    float64
 		Weight   float64
 		Votes    int
+		VotePower float64
 		Round    int
 	}
 
@@ -907,16 +1048,17 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 		if err != nil {
 			return nil, err
 		}
-		votes, err := countProposalVotesTx(ctx, tx, task.ID, proposal.ID, proposal.Round)
+		votes, votePower, err := countProposalVotesTx(ctx, tx, task.ID, proposal.ID, proposal.Round, s.cfg.MinerVotePolicy)
 		if err != nil {
 			return nil, err
 		}
-		entry := proposalScore{Proposal: proposal, Score: score, Weight: weight, Votes: votes, Round: proposal.Round}
+		entry := proposalScore{Proposal: proposal, Score: score, Weight: weight, Votes: votes, VotePower: votePower, Round: proposal.Round}
 		scored = append(scored, entry)
 		if winning == nil ||
-			entry.Votes > winning.Votes ||
-			(entry.Votes == winning.Votes && entry.Score > winning.Score) ||
-			(entry.Votes == winning.Votes && entry.Score == winning.Score && entry.Weight > winning.Weight) {
+			entry.VotePower > winning.VotePower ||
+			(entry.VotePower == winning.VotePower && entry.Votes > winning.Votes) ||
+			(entry.VotePower == winning.VotePower && entry.Votes == winning.Votes && entry.Score > winning.Score) ||
+			(entry.VotePower == winning.VotePower && entry.Votes == winning.Votes && entry.Score == winning.Score && entry.Weight > winning.Weight) {
 			copy := entry
 			winning = &copy
 		}
@@ -1011,18 +1153,18 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 				"winning_agent":      winning.Proposal.Agent,
 				"winning_score":      formatFloat(winning.Score),
 				"winning_votes":      strconv.Itoa(winning.Votes),
+				"winning_vote_power": formatFloat(winning.VotePower),
 			},
 		},
 	}, nil
 }
 
-func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string, creator string, workerCount int, minerCount int) ([]protocol.Event, error) {
+func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string, creator string, workerCount int, minerCount int, policy string) ([]protocol.Event, error) {
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT address
+		`SELECT address, balance, reputation
 		 FROM agents
-		 WHERE address <> $1
-		 ORDER BY balance DESC, reputation DESC, address ASC`,
+		 WHERE address <> $1`,
 		creator,
 	)
 	if err != nil {
@@ -1030,13 +1172,19 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 	}
 	defer rows.Close()
 
-	candidates := make([]string, 0)
+	type roleCandidate struct {
+		Address    string
+		Balance    float64
+		Reputation float64
+	}
+
+	candidates := make([]roleCandidate, 0)
 	for rows.Next() {
-		var address string
-		if err := rows.Scan(&address); err != nil {
+		var candidate roleCandidate
+		if err := rows.Scan(&candidate.Address, &candidate.Balance, &candidate.Reputation); err != nil {
 			return nil, fmt.Errorf("scan role candidate: %w", err)
 		}
-		candidates = append(candidates, address)
+		candidates = append(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate role candidates: %w", err)
@@ -1046,6 +1194,33 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 	if len(candidates) < required {
 		return nil, fmt.Errorf("%w: not enough funded agents to assign workers and miners", ErrValidation)
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		switch strings.TrimSpace(policy) {
+		case "reputation_balance":
+			if candidates[i].Reputation == candidates[j].Reputation {
+				if candidates[i].Balance == candidates[j].Balance {
+					return candidates[i].Address < candidates[j].Address
+				}
+				return candidates[i].Balance > candidates[j].Balance
+			}
+			return candidates[i].Reputation > candidates[j].Reputation
+		case "round_robin_hash":
+			left := protocol.HashStrings([]string{taskID, candidates[i].Address})
+			right := protocol.HashStrings([]string{taskID, candidates[j].Address})
+			if left == right {
+				return candidates[i].Address < candidates[j].Address
+			}
+			return left < right
+		default:
+			if candidates[i].Balance == candidates[j].Balance {
+				if candidates[i].Reputation == candidates[j].Reputation {
+					return candidates[i].Address < candidates[j].Address
+				}
+				return candidates[i].Reputation > candidates[j].Reputation
+			}
+			return candidates[i].Balance > candidates[j].Balance
+		}
+	})
 
 	events := make([]protocol.Event, 0, required+1)
 	for index := 0; index < minerCount; index++ {
@@ -1054,7 +1229,7 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 			`INSERT INTO task_roles (task_id, agent, role)
 			 VALUES ($1, $2, $3)`,
 			taskID,
-			candidates[index],
+			candidates[index].Address,
 			protocol.RoleMiner,
 		); err != nil {
 			return nil, fmt.Errorf("assign miner role: %w", err)
@@ -1067,7 +1242,7 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 			`INSERT INTO task_roles (task_id, agent, role)
 			 VALUES ($1, $2, $3)`,
 			taskID,
-			candidates[index],
+			candidates[index].Address,
 			protocol.RoleWorker,
 		); err != nil {
 			return nil, fmt.Errorf("assign worker role: %w", err)
@@ -1080,6 +1255,7 @@ func (s *Store) assignTaskRolesTx(ctx context.Context, tx *sql.Tx, taskID string
 			"task_id":      taskID,
 			"miner_count":  strconv.Itoa(minerCount),
 			"worker_count": strconv.Itoa(workerCount),
+			"policy":       policy,
 		},
 	})
 
@@ -1144,9 +1320,10 @@ func (s *Store) computeProposalScoreTx(ctx context.Context, tx *sql.Tx, taskID s
 func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID string, proposalID int64, round int, rewardPool float64) error {
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT voter
-		 FROM task_votes
-		 WHERE task_id = $1 AND proposal_id = $2 AND round = $3`,
+		`SELECT v.voter, a.reputation
+		 FROM task_votes v
+		 INNER JOIN agents a ON a.address = v.voter
+		 WHERE v.task_id = $1 AND v.proposal_id = $2 AND v.round = $3`,
 		taskID,
 		proposalID,
 		round,
@@ -1157,13 +1334,23 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 	defer rows.Close()
 
 	type minerReward struct {
-		Agent string
+		Agent  string
+		Weight float64
 	}
 	miners := make([]minerReward, 0)
 	for rows.Next() {
 		var entry minerReward
-		if err := rows.Scan(&entry.Agent); err != nil {
+		var reputation float64
+		if err := rows.Scan(&entry.Agent, &reputation); err != nil {
 			return fmt.Errorf("scan winning proposal voter: %w", err)
+		}
+		if s.cfg.MinerVotePolicy == "one_agent_one_vote" {
+			entry.Weight = 1
+		} else {
+			entry.Weight = execution.Clamp01(reputation)
+			if entry.Weight == 0 {
+				entry.Weight = 0.1
+			}
 		}
 		miners = append(miners, entry)
 	}
@@ -1175,8 +1362,16 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 		return nil
 	}
 
+	var totalWeight float64
 	for _, miner := range miners {
-		reward := rewardPool / float64(len(miners))
+		totalWeight += miner.Weight
+	}
+	if totalWeight == 0 {
+		totalWeight = float64(len(miners))
+	}
+
+	for _, miner := range miners {
+		reward := rewardPool * (miner.Weight / totalWeight)
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE agents
@@ -1195,20 +1390,49 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 	return nil
 }
 
-func countProposalVotesTx(ctx context.Context, tx *sql.Tx, taskID string, proposalID int64, round int) (int, error) {
-	var count int
-	if err := tx.QueryRowContext(
+func countProposalVotesTx(ctx context.Context, tx *sql.Tx, taskID string, proposalID int64, round int, policy string) (int, float64, error) {
+	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT COUNT(1)
-		 FROM task_votes
-		 WHERE task_id = $1 AND proposal_id = $2 AND round = $3`,
+		`SELECT v.voter, a.reputation
+		 FROM task_votes v
+		 INNER JOIN agents a ON a.address = v.voter
+		 WHERE v.task_id = $1 AND v.proposal_id = $2 AND v.round = $3`,
 		taskID,
 		proposalID,
 		round,
-	).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count proposal votes: %w", err)
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count proposal votes: %w", err)
 	}
-	return count, nil
+	defer rows.Close()
+
+	var (
+		count int
+		power float64
+	)
+	for rows.Next() {
+		var (
+			voter      string
+			reputation float64
+		)
+		if err := rows.Scan(&voter, &reputation); err != nil {
+			return 0, 0, fmt.Errorf("scan proposal vote: %w", err)
+		}
+		count++
+		if policy == "one_agent_one_vote" {
+			power += 1
+			continue
+		}
+		weight := execution.Clamp01(reputation)
+		if weight == 0 {
+			weight = 0.1
+		}
+		power += weight
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("iterate proposal votes: %w", err)
+	}
+	return count, power, nil
 }
 
 func currentReputationTx(ctx context.Context, tx *sql.Tx, agent string) float64 {

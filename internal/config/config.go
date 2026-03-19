@@ -24,6 +24,12 @@ type Config struct {
 	ValidatorPrivateKey     string
 	ConsensusRoundTimeout   time.Duration
 	SyncLookaheadBlocks     int
+	RoleSelectionPolicy     string
+	MinerVotePolicy         string
+	ReorgPolicy             string
+	AllowEarlyDebateAdvance bool
+	MinEvaluationsPerProposal int
+	MinVotesPerRound        int
 	ValidatorSlashFraction  float64
 	ValidatorSlashReputationPenalty float64
 	BlockInterval           time.Duration
@@ -53,6 +59,12 @@ func Load() (Config, error) {
 		ValidatorPrivateKey:     txauth.NormalizePublicKey(os.Getenv("VALIDATOR_PRIVATE_KEY")),
 		ConsensusRoundTimeout:   time.Duration(getIntEnv("CONSENSUS_ROUND_TIMEOUT_SECONDS", 10)) * time.Second,
 		SyncLookaheadBlocks:     getIntEnv("SYNC_LOOKAHEAD_BLOCKS", 6),
+		RoleSelectionPolicy:     getEnv("ROLE_SELECTION_POLICY", "balance_reputation"),
+		MinerVotePolicy:         getEnv("MINER_VOTE_POLICY", "reputation_weighted"),
+		ReorgPolicy:             getEnv("REORG_POLICY", "best_certified"),
+		AllowEarlyDebateAdvance: getBoolEnv("ALLOW_EARLY_DEBATE_ADVANCE", true),
+		MinEvaluationsPerProposal: getIntEnv("MIN_EVALUATIONS_PER_PROPOSAL", 1),
+		MinVotesPerRound:        getIntEnv("MIN_VOTES_PER_ROUND", 1),
 		ValidatorSlashFraction:  getFloatEnv("VALIDATOR_SLASH_FRACTION", 0.1),
 		ValidatorSlashReputationPenalty: getFloatEnv("VALIDATOR_SLASH_REPUTATION_PENALTY", 0.2),
 		BlockInterval:           time.Duration(getIntEnv("BLOCK_INTERVAL_SECONDS", 5)) * time.Second,
@@ -76,6 +88,12 @@ func Load() (Config, error) {
 	if cfg.SyncLookaheadBlocks <= 0 {
 		return Config{}, fmt.Errorf("SYNC_LOOKAHEAD_BLOCKS must be > 0")
 	}
+	if cfg.MinEvaluationsPerProposal <= 0 {
+		return Config{}, fmt.Errorf("MIN_EVALUATIONS_PER_PROPOSAL must be > 0")
+	}
+	if cfg.MinVotesPerRound <= 0 {
+		return Config{}, fmt.Errorf("MIN_VOTES_PER_ROUND must be > 0")
+	}
 	if cfg.MaxTransactionsPerBlock <= 0 {
 		return Config{}, fmt.Errorf("MAX_TRANSACTIONS_PER_BLOCK must be > 0")
 	}
@@ -93,6 +111,15 @@ func Load() (Config, error) {
 	}
 	if cfg.ValidatorSlashReputationPenalty < 0 || cfg.ValidatorSlashReputationPenalty > 1 {
 		return Config{}, fmt.Errorf("VALIDATOR_SLASH_REPUTATION_PENALTY must be within [0,1]")
+	}
+	if cfg.RoleSelectionPolicy != "balance_reputation" && cfg.RoleSelectionPolicy != "reputation_balance" && cfg.RoleSelectionPolicy != "round_robin_hash" {
+		return Config{}, fmt.Errorf("ROLE_SELECTION_POLICY must be one of balance_reputation, reputation_balance, round_robin_hash")
+	}
+	if cfg.MinerVotePolicy != "reputation_weighted" && cfg.MinerVotePolicy != "one_agent_one_vote" {
+		return Config{}, fmt.Errorf("MINER_VOTE_POLICY must be one of reputation_weighted, one_agent_one_vote")
+	}
+	if cfg.ReorgPolicy != "forward_only" && cfg.ReorgPolicy != "best_certified" && cfg.ReorgPolicy != "manual" {
+		return Config{}, fmt.Errorf("REORG_POLICY must be one of forward_only, best_certified, manual")
 	}
 	if cfg.ValidatorPrivateKey != "" {
 		decoded, err := hex.DecodeString(cfg.ValidatorPrivateKey)

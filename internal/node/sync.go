@@ -43,7 +43,11 @@ func (s *Service) syncOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		if status.ChainID != s.cfg.ChainID || status.NodeID == s.cfg.NodeID {
+			continue
+		}
 		s.peers.RememberPeer(status)
+		_ = s.store.UpsertPeer(ctx, status)
 		peerStatuses = append(peerStatuses, struct {
 			peer   string
 			status protocol.PeerStatus
@@ -51,27 +55,24 @@ func (s *Service) syncOnce(ctx context.Context) {
 	}
 
 	for {
-		nextHeight := info.HeadHeight + 1
-		branches := s.collectCertifiedBranches(ctx, peerStatuses, nextHeight, info.HeadHash)
-		if len(branches) == 0 {
-			return
-		}
-
-		bestBranch := branches[0]
-		imported := 0
-		for _, bundle := range bestBranch.Bundles {
-			if bundle.Block.Header.Height != info.HeadHeight+1 {
-				break
-			}
-			if err := s.store.ImportCertifiedBlock(ctx, bundle); err != nil {
-				log.Printf("sync import certified block height=%d from=%s error=%v", bundle.Block.Header.Height, bestBranch.Source.NodeID, err)
+		plan, ok := s.selectSyncPlan(ctx, info, peerStatuses)
+		if !ok {
+			if !s.tryStateSync(ctx, info, peerStatuses) {
 				return
 			}
-			info.HeadHeight = bundle.Block.Header.Height
-			info.HeadHash = bundle.Block.Hash
-			imported++
+			info, err = s.store.GetChainInfo(ctx)
+			if err != nil {
+				return
+			}
+			continue
 		}
-		if imported == 0 {
+
+		if err := s.store.ImportCertifiedBranch(ctx, plan.Bundles); err != nil {
+			log.Printf("sync import certified branch fork_height=%d from=%s error=%v", plan.ForkHeight, plan.Source.NodeID, err)
+			return
+		}
+		info, err = s.store.GetChainInfo(ctx)
+		if err != nil {
 			return
 		}
 	}
@@ -80,6 +81,108 @@ func (s *Service) syncOnce(ctx context.Context) {
 type certifiedBranch struct {
 	Source protocol.PeerStatus
 	Bundles []protocol.CertifiedBlock
+}
+
+type syncPlan struct {
+	ForkHeight int64
+	Source     protocol.PeerStatus
+	Bundles    []protocol.CertifiedBlock
+}
+
+func (s *Service) selectSyncPlan(ctx context.Context, info protocol.ChainInfo, peerStatuses []struct {
+	peer   string
+	status protocol.PeerStatus
+}) (syncPlan, bool) {
+	plans := make([]syncPlan, 0)
+
+	nextHeight := info.HeadHeight + 1
+	forwardBranches := s.collectCertifiedBranches(ctx, peerStatuses, nextHeight, info.HeadHash)
+	if len(forwardBranches) > 0 {
+		plans = append(plans, syncPlan{
+			ForkHeight: nextHeight,
+			Source:     forwardBranches[0].Source,
+			Bundles:    forwardBranches[0].Bundles,
+		})
+	}
+
+	if s.cfg.ReorgPolicy == "best_certified" {
+		start := syncStartHeight(info.HeadHeight, s.cfg.SyncLookaheadBlocks)
+		for forkHeight := start; forkHeight <= info.HeadHeight; forkHeight++ {
+			parentHash, err := s.parentHashForFork(ctx, info, forkHeight)
+			if err != nil {
+				continue
+			}
+
+			remoteBranches := s.collectCertifiedBranches(ctx, peerStatuses, forkHeight, parentHash)
+			if len(remoteBranches) == 0 {
+				continue
+			}
+
+			localBundles, err := s.store.ListCertifiedBlocksRange(ctx, forkHeight, s.cfg.SyncLookaheadBlocks)
+			if err != nil || len(localBundles) == 0 {
+				continue
+			}
+			if !betterBranch(remoteBranches[0], certifiedBranch{Source: protocol.PeerStatus{NodeID: s.cfg.NodeID}, Bundles: localBundles}) {
+				continue
+			}
+
+			trimmed := trimCommonCertifiedPrefix(localBundles, remoteBranches[0].Bundles)
+			if len(trimmed) == 0 {
+				continue
+			}
+
+			plans = append(plans, syncPlan{
+				ForkHeight: trimmed[0].Block.Header.Height,
+				Source:     remoteBranches[0].Source,
+				Bundles:    trimmed,
+			})
+		}
+	}
+
+	if len(plans) == 0 {
+		return syncPlan{}, false
+	}
+	sort.Slice(plans, func(i, j int) bool {
+		return betterSyncPlan(plans[i], plans[j])
+	})
+	return plans[0], true
+}
+
+func (s *Service) tryStateSync(ctx context.Context, info protocol.ChainInfo, peerStatuses []struct {
+	peer   string
+	status protocol.PeerStatus
+}) bool {
+	var best *protocol.PeerStatus
+	for _, peer := range peerStatuses {
+		if peer.status.HeadHeight <= info.HeadHeight {
+			continue
+		}
+		if best == nil || peer.status.HeadHeight > best.HeadHeight || (peer.status.HeadHeight == best.HeadHeight && peer.status.NodeID < best.NodeID) {
+			status := peer.status
+			best = &status
+		}
+	}
+	if best == nil {
+		return false
+	}
+
+	snapshot, err := s.peers.FetchStateSnapshot(ctx, best.ListenAddr, s.cfg.SyncLookaheadBlocks)
+	if err != nil {
+		return false
+	}
+	if snapshot.ChainInfo.ChainID != s.cfg.ChainID {
+		return false
+	}
+	for _, bundle := range snapshot.CertifiedWindow {
+		if err := s.engine.VerifyCertifiedBlock(bundle); err != nil {
+			return false
+		}
+	}
+	if err := s.store.ImportStateSnapshot(ctx, snapshot); err != nil {
+		log.Printf("sync state snapshot from=%s error=%v", best.NodeID, err)
+		return false
+	}
+	return true
 }
 
 func (s *Service) collectCertifiedBranches(ctx context.Context, peerStatuses []struct {
@@ -127,6 +230,67 @@ func (s *Service) collectCertifiedBranches(ctx context.Context, peerStatuses []s
 		return betterBranch(branches[i], branches[j])
 	})
 	return branches
+}
+
+func (s *Service) parentHashForFork(ctx context.Context, info protocol.ChainInfo, forkHeight int64) (string, error) {
+	if forkHeight <= 1 {
+		return info.GenesisHash, nil
+	}
+	block, err := s.store.GetBlockByHeight(ctx, forkHeight-1)
+	if err != nil {
+		return "", err
+	}
+	return block.Hash, nil
+}
+
+func syncStartHeight(headHeight int64, lookahead int) int64 {
+	start := headHeight - int64(lookahead) + 1
+	if start < 1 {
+		return 1
+	}
+	return start
+}
+
+func trimCommonCertifiedPrefix(local []protocol.CertifiedBlock, remote []protocol.CertifiedBlock) []protocol.CertifiedBlock {
+	index := 0
+	for index < len(local) && index < len(remote) {
+		if local[index].Block.Hash != remote[index].Block.Hash {
+			break
+		}
+		index++
+	}
+	if index >= len(remote) {
+		return nil
+	}
+	return append([]protocol.CertifiedBlock(nil), remote[index:]...)
+}
+
+func betterSyncPlan(candidate syncPlan, current syncPlan) bool {
+	if len(candidate.Bundles) == 0 {
+		return false
+	}
+	if len(current.Bundles) == 0 {
+		return true
+	}
+
+	candidateTip := candidate.Bundles[len(candidate.Bundles)-1]
+	currentTip := current.Bundles[len(current.Bundles)-1]
+	if candidateTip.Block.Header.Height != currentTip.Block.Header.Height {
+		return candidateTip.Block.Header.Height > currentTip.Block.Header.Height
+	}
+	if preferredCertificate(candidateTip.Certificate, currentTip.Certificate) {
+		return true
+	}
+	if preferredCertificate(currentTip.Certificate, candidateTip.Certificate) {
+		return false
+	}
+	if len(candidate.Bundles) != len(current.Bundles) {
+		return len(candidate.Bundles) > len(current.Bundles)
+	}
+	if candidate.ForkHeight != current.ForkHeight {
+		return candidate.ForkHeight < current.ForkHeight
+	}
+	return candidate.Source.NodeID < current.Source.NodeID
 }
 
 func betterBranch(candidate certifiedBranch, current certifiedBranch) bool {

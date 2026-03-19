@@ -313,8 +313,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_pool_sender_nonce ON tx_pool(sender, no
 `
 
 type Store struct {
-	db  *sql.DB
-	cfg config.Config
+	db            *sql.DB
+	cfg           config.Config
+	schemaVersion int
 }
 
 type SealOptions struct {
@@ -372,6 +373,10 @@ func New(cfg config.Config) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.syncValidatorRegistry(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return store, nil
 }
@@ -380,19 +385,16 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) initSchema(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("init schema: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequest) (protocol.TransactionStatus, error) {
 	req.Creator = strings.TrimSpace(req.Creator)
 	req.Type = strings.TrimSpace(req.Type)
 	req.Question = strings.TrimSpace(req.Question)
+	req.RoleSelectionPolicy = strings.TrimSpace(req.RoleSelectionPolicy)
 	if req.Type == "" {
 		req.Type = protocol.TaskTypePrediction
+	}
+	if req.RoleSelectionPolicy == "" {
+		req.RoleSelectionPolicy = s.cfg.RoleSelectionPolicy
 	}
 
 	switch {
@@ -414,6 +416,8 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: worker_count must be > 0 for blockagents tasks", ErrValidation)
 	case req.Type == protocol.TaskTypeBlockAgents && req.MinerCount <= 0:
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: miner_count must be > 0 for blockagents tasks", ErrValidation)
+	case req.Type == protocol.TaskTypeBlockAgents && !isSupportedRoleSelectionPolicy(req.RoleSelectionPolicy):
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported role_selection_policy", ErrValidation)
 	}
 
 	payload := struct {
@@ -426,6 +430,7 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		DebateRounds int     `json:"debate_rounds,omitempty"`
 		WorkerCount  int     `json:"worker_count,omitempty"`
 		MinerCount   int     `json:"miner_count,omitempty"`
+		RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
 	}{
 		Creator:      req.Creator,
 		Type:         req.Type,
@@ -436,6 +441,7 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		DebateRounds: req.DebateRounds,
 		WorkerCount:  req.WorkerCount,
 		MinerCount:   req.MinerCount,
+		RoleSelectionPolicy: req.RoleSelectionPolicy,
 	}
 
 	return s.enqueueTransaction(ctx, protocol.TxTypeCreateTask, req.Creator, req.Auth, payload, true)
@@ -650,6 +656,50 @@ func (s *Store) QueueFunding(ctx context.Context, req protocol.FundAgentRequest)
 	return s.enqueueTransaction(ctx, protocol.TxTypeFundAgent, s.cfg.Genesis.FaucetAddress, protocol.TxAuth{}, payload, false)
 }
 
+func (s *Store) QueueBootstrapAgentKey(ctx context.Context, req protocol.BootstrapAgentKeyRequest) (protocol.TransactionStatus, error) {
+	req.Agent = strings.TrimSpace(req.Agent)
+	if req.Agent == "" {
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: agent is required", ErrValidation)
+	}
+
+	payload := struct {
+		Agent string `json:"agent"`
+	}{
+		Agent: req.Agent,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeBootstrapAgentKey, req.Agent, req.Auth, payload, true)
+}
+
+func (s *Store) QueueRotateAgentKey(ctx context.Context, req protocol.RotateAgentKeyRequest) (protocol.TransactionStatus, error) {
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.NewPublicKey = strings.ToLower(strings.TrimSpace(req.NewPublicKey))
+	req.NewSignature = strings.ToLower(strings.TrimSpace(req.NewSignature))
+
+	switch {
+	case req.Agent == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: agent is required", ErrValidation)
+	case req.NewPublicKey == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: new_public_key is required", ErrValidation)
+	case req.NewSignature == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: new_signature is required", ErrValidation)
+	case req.NewPublicKey == strings.ToLower(strings.TrimSpace(req.Auth.PublicKey)):
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: new_public_key must differ from current public_key", ErrValidation)
+	}
+
+	payload := struct {
+		Agent        string `json:"agent"`
+		NewPublicKey string `json:"new_public_key"`
+		NewSignature string `json:"new_signature"`
+	}{
+		Agent:        req.Agent,
+		NewPublicKey: req.NewPublicKey,
+		NewSignature: req.NewSignature,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeRotateAgentKey, req.Agent, req.Auth, payload, true)
+}
+
 func (s *Store) enqueueTransaction(ctx context.Context, txType protocol.TxType, sender string, auth protocol.TxAuth, payload any, requireAuth bool) (protocol.TransactionStatus, error) {
 	tx, err := s.prepareTransaction(ctx, txType, sender, auth, payload, requireAuth)
 	if err != nil {
@@ -708,4 +758,13 @@ func isUniqueViolation(err error) bool {
 		return pgErr.Code == "23505"
 	}
 	return false
+}
+
+func isSupportedRoleSelectionPolicy(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "balance_reputation", "reputation_balance", "round_robin_hash":
+		return true
+	default:
+		return false
+	}
 }

@@ -9,14 +9,16 @@ import (
 	"aichain/internal/protocol"
 )
 
-func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, slashFraction float64, reputationPenalty float64) ([]protocol.Event, error) {
+func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, nowUnix int64, slashFraction float64, reputationPenalty float64) ([]protocol.Event, error) {
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT id, validator, evidence_type
 		 FROM consensus_evidence
 		 WHERE processed_at IS NULL
+		   AND observed_at <= TO_TIMESTAMP($1)
 		 ORDER BY id ASC
 		 FOR UPDATE`,
+		nowUnix,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query unprocessed consensus evidence: %w", err)
@@ -117,4 +119,3 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, slashFra
 
 	return events, nil
 }
-
