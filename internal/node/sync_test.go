@@ -7,15 +7,6 @@ import (
 	"aichain/internal/protocol"
 )
 
-func TestSyncStartHeight(t *testing.T) {
-	if got := syncStartHeight(3, 6); got != 1 {
-		t.Fatalf("expected start height 1, got %d", got)
-	}
-	if got := syncStartHeight(12, 4); got != 9 {
-		t.Fatalf("expected start height 9, got %d", got)
-	}
-}
-
 func TestTrimCommonCertifiedPrefix(t *testing.T) {
 	local := []protocol.CertifiedBlock{
 		testCertifiedBlock(4, "parent-3", "block-4a", 1, 2),

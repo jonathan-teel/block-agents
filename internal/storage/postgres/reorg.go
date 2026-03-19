@@ -114,9 +114,6 @@ func (s *Store) reorganizeCanonicalBranchTx(ctx context.Context, tx *sql.Tx, met
 	if depth <= 0 {
 		return fmt.Errorf("%w: certified branch is not a reorg candidate", ErrValidation)
 	}
-	if depth > int64(s.cfg.SyncLookaheadBlocks) {
-		return fmt.Errorf("%w: reorg depth %d exceeds configured lookahead %d", ErrValidation, depth, s.cfg.SyncLookaheadBlocks)
-	}
 
 	parentBlock, err := loadCanonicalBlockTx(ctx, tx, forkHeight-1)
 	if err != nil {
@@ -137,7 +134,7 @@ func (s *Store) reorganizeCanonicalBranchTx(ctx context.Context, tx *sql.Tx, met
 	if err := deleteCanonicalSuffixTx(ctx, tx, forkHeight); err != nil {
 		return err
 	}
-	if err := resetExecutionStateTx(ctx, tx, s.cfg.Genesis); err != nil {
+	if err := resetExecutionStateTx(ctx, tx, s.cfg.Genesis, s.cfg.TreasuryAddress, s.cfg.DefaultAgentReputation); err != nil {
 		return err
 	}
 	if err := resetHeadToGenesisTx(ctx, tx); err != nil {
@@ -244,16 +241,22 @@ func deleteCanonicalSuffixTx(ctx context.Context, tx *sql.Tx, fromHeight int64) 
 	return nil
 }
 
-func resetExecutionStateTx(ctx context.Context, tx *sql.Tx, genesis protocol.Genesis) error {
+func resetExecutionStateTx(ctx context.Context, tx *sql.Tx, genesis protocol.Genesis, treasuryAddress string, defaultReputation float64) error {
 	if _, err := tx.ExecContext(
 		ctx,
 		`TRUNCATE TABLE
+		     governance_votes,
+		     governance_proposals,
+		     governance_parameters,
+		     oracle_reports,
 		     proof_artifacts,
 		     task_votes,
+		     task_rebuttals,
 		     task_evaluations,
 		     task_proposals,
 		     task_roles,
 		     task_debate_state,
+		     task_disputes,
 		     task_results,
 		     submissions,
 		     tasks,
@@ -264,6 +267,9 @@ func resetExecutionStateTx(ctx context.Context, tx *sql.Tx, genesis protocol.Gen
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents`); err != nil {
 		return fmt.Errorf("reset agents: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM validator_registry`); err != nil {
+		return fmt.Errorf("reset validator registry: %w", err)
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -287,6 +293,25 @@ func resetExecutionStateTx(ctx context.Context, tx *sql.Tx, genesis protocol.Gen
 			genesis.GenesisTime,
 		); err != nil {
 			return fmt.Errorf("restore genesis account %s: %w", account.Address, err)
+		}
+	}
+	if err := ensureAgentExistsTx(ctx, tx, treasuryAddress, defaultReputation); err != nil {
+		return fmt.Errorf("restore treasury account: %w", err)
+	}
+	for _, validator := range genesis.Validators {
+		if err := ensureAgentExistsTx(ctx, tx, validator.Address, defaultReputation); err != nil {
+			return fmt.Errorf("restore validator account %s: %w", validator.Address, err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO validator_registry (address, public_key, power, active, created_at, updated_at)
+			 VALUES ($1, $2, $3, TRUE, $4, $4)`,
+			validator.Address,
+			validator.PublicKey,
+			validator.Power,
+			genesis.GenesisTime,
+		); err != nil {
+			return fmt.Errorf("restore genesis validator %s: %w", validator.Address, err)
 		}
 	}
 

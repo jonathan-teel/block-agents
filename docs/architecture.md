@@ -41,18 +41,25 @@ Transaction families:
 
 - task creation
 - prediction submissions
+- oracle-backed prediction submissions
 - blockagents proofs
 - blockagents proposals
 - blockagents evaluations
+- blockagents rebuttals
 - blockagents votes
 - agent key bootstrap
 - agent key rotation
+- validator membership updates
+- dispute open and dispute resolution
+- governance proposal and governance vote
+- oracle-backed prediction task creation
 - faucet funding
 
 The same HTTP server also exposes P2P endpoints for:
 
 - peer hello and status exchange
 - peer discovery
+- peer telemetry
 - candidate block fetch
 - certified block range fetch and import
 - retained-window state snapshot export and import
@@ -70,9 +77,10 @@ The candidate builder wakes up every block interval and:
 4. authenticates the sender identity and consumes the account nonce
 5. executes transactions against state inside per-transaction savepoints
 6. updates open-task consensus where applicable
-7. settles expired tasks
-8. assembles a candidate block without mutating canonical state
-9. hands the candidate block to the consensus engine
+7. finalizes expired governance proposals and executes approved policy actions
+8. settles expired tasks
+9. assembles a candidate block without mutating canonical state
+10. hands the candidate block to the consensus engine
 
 ### 4. State Machine
 
@@ -85,14 +93,20 @@ The state machine spans:
 - prediction submissions
 - worker proposals
 - miner evaluations
+- worker rebuttals
 - miner votes
 - proof-of-thought artifacts
 - task results
+- governance parameters
+- governance proposals
+- governance votes
 
 The node also carries an experimental validator-consensus layer for:
 
-- persistent validator registry mirrored from genesis
+- persistent validator registry with authenticated membership updates
+- validator-signed peer hello and peer status admission
 - transitive peer discovery backed by `peer_registry`
+- peer health scoring, retry backoff, and duplicate-broadcast suppression
 - validator-set proposer selection
 - follower-side candidate-block fetch and replay validation
 - conflict detection for equivocation
@@ -102,11 +116,24 @@ The node also carries an experimental validator-consensus layer for:
 - quorum certificate formation
 - certified block propagation over the P2P transport
 - persistent fork-choice preference by height
-- best-certified branch preference within a configurable sync lookahead window
-- bounded canonical reorg support through replay-based branch import
+- validator-aware branch verification across membership changes
+- best-certified branch preference through common-ancestor certified sync
+- replay-based deep canonical reorg support under `REORG_POLICY=best_certified`
 - retained-window state snapshot export and import for catch-up sync
+- sync telemetry for branch import and snapshot recovery
 - certified local commit after precommit quorum
 - on-chain validator slashing from processed evidence
+- treasury-routed slash accounting
+
+The execution layer also includes a market-control path for:
+
+- bonded task disputes opened within a configurable post-settlement window
+- validator-resolved dispute outcomes
+- treasury capture of rejected dispute bonds
+- disputed task status transitions for challenged settlements
+- external oracle polling for oracle-backed prediction tasks
+- validator-governed treasury transfers
+- validator-governed app-policy parameter updates
 
 Consensus messages, safety evidence, certificates, and round changes are also persisted in Postgres so peers can serve certified blocks, restart without losing round state, and reconstruct the proof of finality.
 
@@ -121,10 +148,11 @@ The primary protocol path is:
 4. stage-gated `submit_proof` transactions for worker and miner reasoning artifacts
 5. worker `submit_proposal` transactions during proposal stages
 6. miner `submit_evaluation` transactions during evaluation stages
-7. miner `submit_vote` transactions during vote stages
-8. automatic stage advancement during candidate construction and certified replay
+7. worker `submit_rebuttal` transactions during rebuttal stages
+8. miner `submit_vote` transactions during vote stages
+9. automatic stage advancement during candidate construction and certified replay
    Early advancement is controlled by `ALLOW_EARLY_DEBATE_ADVANCE`, `MIN_EVALUATIONS_PER_PROPOSAL`, and `MIN_VOTES_PER_ROUND`.
-9. settlement of a winning proposal from latest-round vote totals with evaluation-based tie-breaks
+10. settlement of a winning proposal from latest-round vote totals with evaluation-based tie-breaks
    Vote weighting is controlled by `MINER_VOTE_POLICY`.
 
 This gives BlockAgents a concrete on-chain coordination workflow instead of a generic CRUD task board.
@@ -154,11 +182,19 @@ The Postgres backend persists:
 - `submissions`
 - `task_proposals`
 - `task_evaluations`
+- `task_rebuttals`
 - `task_votes`
 - `proof_artifacts`
 - `task_results`
+- `task_disputes`
+- `oracle_reports`
+- `governance_parameters`
+- `governance_proposals`
+- `governance_votes`
 
 This makes the full deliberation path auditable while protocol semantics are still changing.
+
+Runtime-only peer transport health is intentionally kept in memory rather than persisted. That includes per-peer score, consecutive failures, backoff windows, and last transport error. The public API exposes this view for operators through `/v1/p2p/telemetry`.
 
 ## Determinism Rules
 
@@ -174,9 +210,12 @@ BlockAgents enforces it through:
 - deterministic role assignment
 - durable quorum-derived round recovery
 - replay verification before follower voting on fetched candidate blocks
-- contiguous certified-branch validation during peer sync
-- canonical branch replacement through replay-based bounded reorg
-- retained-window state snapshot import that must reproduce the advertised head state root
+- validator-aware certified-branch validation during peer sync
+- canonical branch replacement through replay-based deep reorg
+- retained-window state snapshot import that must reproduce the advertised head state root and validator registry
+- dispute and treasury state as part of the canonical execution snapshot
+- persisted oracle reports as deterministic prediction-settlement inputs
+- governance proposals, votes, and parameter overrides as part of the canonical execution snapshot
 - replay-verified certified import for canonical block commitment
 - per-transaction savepoint rollback on execution failure
 - explicit block validation before commit
@@ -185,8 +224,9 @@ BlockAgents enforces it through:
 
 Not implemented yet:
 
-- production-grade peer admission, scoring, and transport hardening
 - full cryptographic verification of proof-of-thought semantic truth
-- unbounded deep canonical fork-choice and reorg handling across long-lived branches
+- stronger peer admission and transport hardening beyond validator-signed identity, retry backoff, hello rate limits, duplicate suppression, and transitive peer discovery
+- production-grade trust minimization for snapshot/state sync beyond retained-window certified-state verification
+- broader oracle-source diversity beyond the current HTTP JSON adapter
 
 Those are protocol roadmap items, not implied features.

@@ -47,9 +47,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 	debate_rounds INTEGER NOT NULL DEFAULT 1,
 	worker_count INTEGER NOT NULL DEFAULT 0,
 	miner_count INTEGER NOT NULL DEFAULT 0,
+	oracle_source TEXT NOT NULL DEFAULT '',
+	oracle_endpoint TEXT NOT NULL DEFAULT '',
+	oracle_path TEXT NOT NULL DEFAULT '',
 	reward_pool DOUBLE PRECISION NOT NULL CHECK (reward_pool >= 0),
 	min_stake DOUBLE PRECISION NOT NULL CHECK (min_stake > 0),
-	status TEXT NOT NULL CHECK (status IN ('open', 'settled')),
+	status TEXT NOT NULL CHECK (status IN ('open', 'settled', 'disputed')),
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -73,6 +76,33 @@ CREATE TABLE IF NOT EXISTS task_results (
 	settled BOOLEAN NOT NULL DEFAULT FALSE,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	settled_at TIMESTAMPTZ NULL
+);
+
+CREATE TABLE IF NOT EXISTS oracle_reports (
+	id BIGSERIAL PRIMARY KEY,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	source TEXT NOT NULL,
+	endpoint TEXT NOT NULL,
+	path TEXT NOT NULL,
+	value DOUBLE PRECISION NOT NULL CHECK (value >= 0 AND value <= 1),
+	observed_at TIMESTAMPTZ NOT NULL,
+	raw_hash TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS task_disputes (
+	id BIGSERIAL PRIMARY KEY,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	challenger TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
+	bond DOUBLE PRECISION NOT NULL CHECK (bond > 0),
+	reason TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('open', 'rejected', 'upheld')),
+	resolver TEXT NULL REFERENCES agents(address) ON DELETE RESTRICT,
+	resolution TEXT NOT NULL DEFAULT '',
+	notes TEXT NOT NULL DEFAULT '',
+	opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	resolved_at TIMESTAMPTZ NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS task_roles (
@@ -119,10 +149,21 @@ CREATE TABLE IF NOT EXISTS task_votes (
 	CONSTRAINT task_votes_unique UNIQUE (task_id, voter, round)
 );
 
+CREATE TABLE IF NOT EXISTS task_rebuttals (
+	id BIGSERIAL PRIMARY KEY,
+	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+	proposal_id BIGINT NOT NULL REFERENCES task_proposals(id) ON DELETE CASCADE,
+	agent TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
+	round INTEGER NOT NULL CHECK (round > 0),
+	content TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	CONSTRAINT task_rebuttals_unique UNIQUE (task_id, agent, round)
+);
+
 CREATE TABLE IF NOT EXISTS task_debate_state (
 	task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
 	current_round INTEGER NOT NULL CHECK (current_round > 0),
-	current_stage TEXT NOT NULL CHECK (current_stage IN ('proposal', 'evaluation', 'vote', 'complete')),
+	current_stage TEXT NOT NULL CHECK (current_stage IN ('proposal', 'evaluation', 'rebuttal', 'vote', 'complete')),
 	stage_duration_seconds BIGINT NOT NULL CHECK (stage_duration_seconds > 0),
 	stage_started_at TIMESTAMPTZ NOT NULL,
 	stage_deadline TIMESTAMPTZ NOT NULL,
@@ -134,7 +175,7 @@ CREATE TABLE IF NOT EXISTS proof_artifacts (
 	task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 	agent TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
 	round INTEGER NOT NULL CHECK (round > 0),
-	stage TEXT NOT NULL CHECK (stage IN ('proposal', 'evaluation', 'vote')),
+	stage TEXT NOT NULL CHECK (stage IN ('proposal', 'evaluation', 'rebuttal', 'vote')),
 	artifact_type TEXT NOT NULL,
 	content TEXT NOT NULL,
 	content_hash TEXT NOT NULL,
@@ -143,6 +184,39 @@ CREATE TABLE IF NOT EXISTS proof_artifacts (
 	parent_type TEXT NULL,
 	parent_id BIGINT NULL,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS governance_parameters (
+	name TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS governance_proposals (
+	id BIGSERIAL PRIMARY KEY,
+	proposer TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
+	proposal_type TEXT NOT NULL CHECK (proposal_type IN ('treasury_transfer', 'parameter_change')),
+	title TEXT NOT NULL,
+	description TEXT NOT NULL,
+	target_address TEXT NOT NULL DEFAULT '',
+	amount DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (amount >= 0),
+	parameter_name TEXT NOT NULL DEFAULT '',
+	parameter_value TEXT NOT NULL DEFAULT '',
+	voting_deadline BIGINT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('open', 'executed', 'rejected')),
+	execution_note TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	resolved_at TIMESTAMPTZ NULL
+);
+
+CREATE TABLE IF NOT EXISTS governance_votes (
+	id BIGSERIAL PRIMARY KEY,
+	proposal_id BIGINT NOT NULL REFERENCES governance_proposals(id) ON DELETE CASCADE,
+	voter TEXT NOT NULL REFERENCES agents(address) ON DELETE RESTRICT,
+	vote TEXT NOT NULL CHECK (vote IN ('approve', 'reject')),
+	power BIGINT NOT NULL CHECK (power > 0),
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	CONSTRAINT governance_votes_unique UNIQUE (proposal_id, voter)
 );
 
 CREATE TABLE IF NOT EXISTS blocks (
@@ -278,13 +352,19 @@ CREATE TABLE IF NOT EXISTS consensus_evidence (
 
 CREATE INDEX IF NOT EXISTS idx_tx_pool_status_sequence ON tx_pool(status, sequence);
 CREATE INDEX IF NOT EXISTS idx_tasks_status_deadline ON tasks(status, deadline);
+CREATE INDEX IF NOT EXISTS idx_tasks_oracle_pending ON tasks(type, status, deadline) WHERE oracle_source <> '';
 CREATE INDEX IF NOT EXISTS idx_submissions_task_id ON submissions(task_id);
+CREATE INDEX IF NOT EXISTS idx_oracle_reports_task_id ON oracle_reports(task_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_disputes_task_id ON task_disputes(task_id, status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_roles_task_id ON task_roles(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_proposals_task_round ON task_proposals(task_id, round, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_evaluations_task_round ON task_evaluations(task_id, round, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_votes_task_round ON task_votes(task_id, round, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_rebuttals_task_round ON task_rebuttals(task_id, round, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_debate_state_stage ON task_debate_state(current_stage, stage_deadline);
 CREATE INDEX IF NOT EXISTS idx_proof_artifacts_task_round_stage ON proof_artifacts(task_id, round, stage, created_at);
+CREATE INDEX IF NOT EXISTS idx_governance_proposals_status_deadline ON governance_proposals(status, voting_deadline, created_at);
+CREATE INDEX IF NOT EXISTS idx_governance_votes_proposal_id ON governance_votes(proposal_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_consensus_proposals_height ON consensus_proposals(height, round);
 CREATE INDEX IF NOT EXISTS idx_consensus_votes_height ON consensus_votes(height, round, vote_type, block_hash);
 CREATE INDEX IF NOT EXISTS idx_consensus_certificates_height ON consensus_certificates(height, round, vote_type);
@@ -296,6 +376,9 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS next_nonce BIGINT NOT NULL DEFAULT 0
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS debate_rounds INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS worker_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS miner_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS oracle_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS oracle_endpoint TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS oracle_path TEXT NOT NULL DEFAULT '';
 ALTER TABLE task_results ADD COLUMN IF NOT EXISTS winning_proposal_id BIGINT NULL;
 ALTER TABLE task_results ADD COLUMN IF NOT EXISTS winning_agent TEXT NULL;
 ALTER TABLE tx_pool ADD COLUMN IF NOT EXISTS nonce BIGINT NOT NULL DEFAULT 0;
@@ -309,6 +392,12 @@ ALTER TABLE proof_artifacts ADD COLUMN IF NOT EXISTS semantic_root TEXT NOT NULL
 ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL;
 ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS applied_balance_penalty DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE consensus_evidence ADD COLUMN IF NOT EXISTS applied_reputation_penalty DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
+ALTER TABLE tasks ADD CONSTRAINT tasks_status_check CHECK (status IN ('open', 'settled', 'disputed'));
+ALTER TABLE task_debate_state DROP CONSTRAINT IF EXISTS task_debate_state_current_stage_check;
+ALTER TABLE task_debate_state ADD CONSTRAINT task_debate_state_current_stage_check CHECK (current_stage IN ('proposal', 'evaluation', 'rebuttal', 'vote', 'complete'));
+ALTER TABLE proof_artifacts DROP CONSTRAINT IF EXISTS proof_artifacts_stage_check;
+ALTER TABLE proof_artifacts ADD CONSTRAINT proof_artifacts_stage_check CHECK (stage IN ('proposal', 'evaluation', 'rebuttal', 'vote'));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_pool_sender_nonce ON tx_pool(sender, nonce) WHERE nonce > 0;
 `
 
@@ -373,6 +462,10 @@ func New(cfg config.Config) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.syncSystemAccounts(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := store.syncValidatorRegistry(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -390,17 +483,17 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 	req.Type = strings.TrimSpace(req.Type)
 	req.Question = strings.TrimSpace(req.Question)
 	req.RoleSelectionPolicy = strings.TrimSpace(req.RoleSelectionPolicy)
+	req.OracleSource = strings.TrimSpace(req.OracleSource)
+	req.OracleEndpoint = strings.TrimSpace(req.OracleEndpoint)
+	req.OraclePath = strings.TrimSpace(req.OraclePath)
 	if req.Type == "" {
 		req.Type = protocol.TaskTypePrediction
-	}
-	if req.RoleSelectionPolicy == "" {
-		req.RoleSelectionPolicy = s.cfg.RoleSelectionPolicy
 	}
 
 	switch {
 	case req.Creator == "":
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: creator is required", ErrValidation)
-	case req.Type != protocol.TaskTypePrediction && req.Type != protocol.TaskTypeBlockAgents:
+	case req.Type != protocol.TaskTypePrediction && req.Type != protocol.TaskTypeOraclePrediction && req.Type != protocol.TaskTypeBlockAgents:
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported task type", ErrValidation)
 	case req.Question == "":
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: question is required", ErrValidation)
@@ -416,8 +509,22 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: worker_count must be > 0 for blockagents tasks", ErrValidation)
 	case req.Type == protocol.TaskTypeBlockAgents && req.MinerCount <= 0:
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: miner_count must be > 0 for blockagents tasks", ErrValidation)
-	case req.Type == protocol.TaskTypeBlockAgents && !isSupportedRoleSelectionPolicy(req.RoleSelectionPolicy):
+	case req.Type == protocol.TaskTypeBlockAgents && req.RoleSelectionPolicy != "" && !isSupportedRoleSelectionPolicy(req.RoleSelectionPolicy):
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported role_selection_policy", ErrValidation)
+	case req.Type == protocol.TaskTypeBlockAgents && (req.OracleSource != "" || req.OracleEndpoint != "" || req.OraclePath != ""):
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle fields are only supported for prediction-family tasks", ErrValidation)
+	case (req.Type == protocol.TaskTypePrediction || req.Type == protocol.TaskTypeOraclePrediction) && req.OracleSource != "" && req.OracleSource != "http_json":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported oracle_source", ErrValidation)
+	case req.Type == protocol.TaskTypeOraclePrediction && req.OracleSource == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle_source is required for oracle_prediction tasks", ErrValidation)
+	case req.Type == protocol.TaskTypeOraclePrediction && req.OracleEndpoint == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle_endpoint is required for oracle_prediction tasks", ErrValidation)
+	case req.Type == protocol.TaskTypeOraclePrediction && req.OraclePath == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle_path is required for oracle_prediction tasks", ErrValidation)
+	case (req.Type == protocol.TaskTypePrediction || req.Type == protocol.TaskTypeOraclePrediction) && req.OracleSource != "" && req.OracleEndpoint == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle_endpoint is required when oracle_source is set", ErrValidation)
+	case (req.Type == protocol.TaskTypePrediction || req.Type == protocol.TaskTypeOraclePrediction) && req.OracleSource != "" && req.OraclePath == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: oracle_path is required when oracle_source is set", ErrValidation)
 	}
 
 	payload := struct {
@@ -431,6 +538,9 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		WorkerCount  int     `json:"worker_count,omitempty"`
 		MinerCount   int     `json:"miner_count,omitempty"`
 		RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
+		OracleSource string `json:"oracle_source,omitempty"`
+		OracleEndpoint string `json:"oracle_endpoint,omitempty"`
+		OraclePath string `json:"oracle_path,omitempty"`
 	}{
 		Creator:      req.Creator,
 		Type:         req.Type,
@@ -442,6 +552,9 @@ func (s *Store) QueueCreateTask(ctx context.Context, req protocol.CreateTaskRequ
 		WorkerCount:  req.WorkerCount,
 		MinerCount:   req.MinerCount,
 		RoleSelectionPolicy: req.RoleSelectionPolicy,
+		OracleSource: req.OracleSource,
+		OracleEndpoint: req.OracleEndpoint,
+		OraclePath: req.OraclePath,
 	}
 
 	return s.enqueueTransaction(ctx, protocol.TxTypeCreateTask, req.Creator, req.Auth, payload, true)
@@ -553,6 +666,41 @@ func (s *Store) QueueEvaluation(ctx context.Context, req protocol.SubmitEvaluati
 	return s.enqueueTransaction(ctx, protocol.TxTypeSubmitEvaluation, req.Evaluator, req.Auth, payload, true)
 }
 
+func (s *Store) QueueRebuttal(ctx context.Context, req protocol.SubmitRebuttalRequest) (protocol.TransactionStatus, error) {
+	req.TaskID = strings.TrimSpace(req.TaskID)
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.Content = strings.TrimSpace(req.Content)
+
+	switch {
+	case req.TaskID == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: task_id is required", ErrValidation)
+	case req.ProposalID <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: proposal_id must be > 0", ErrValidation)
+	case req.Agent == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: agent is required", ErrValidation)
+	case req.Round <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: round must be > 0", ErrValidation)
+	case req.Content == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: content is required", ErrValidation)
+	}
+
+	payload := struct {
+		TaskID     string `json:"task_id"`
+		ProposalID int64  `json:"proposal_id"`
+		Agent      string `json:"agent"`
+		Round      int    `json:"round"`
+		Content    string `json:"content"`
+	}{
+		TaskID:     req.TaskID,
+		ProposalID: req.ProposalID,
+		Agent:      req.Agent,
+		Round:      req.Round,
+		Content:    req.Content,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeSubmitRebuttal, req.Agent, req.Auth, payload, true)
+}
+
 func (s *Store) QueueVote(ctx context.Context, req protocol.SubmitVoteRequest) (protocol.TransactionStatus, error) {
 	req.TaskID = strings.TrimSpace(req.TaskID)
 	req.Voter = strings.TrimSpace(req.Voter)
@@ -601,7 +749,7 @@ func (s *Store) QueueProof(ctx context.Context, req protocol.SubmitProofRequest)
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: agent is required", ErrValidation)
 	case req.Round <= 0:
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: round must be > 0", ErrValidation)
-	case req.Stage != protocol.DebateStageProposal && req.Stage != protocol.DebateStageEvaluation && req.Stage != protocol.DebateStageVote:
+	case req.Stage != protocol.DebateStageProposal && req.Stage != protocol.DebateStageEvaluation && req.Stage != protocol.DebateStageRebuttal && req.Stage != protocol.DebateStageVote:
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported debate stage", ErrValidation)
 	case req.ArtifactType == "":
 		return protocol.TransactionStatus{}, fmt.Errorf("%w: artifact_type is required", ErrValidation)
@@ -698,6 +846,200 @@ func (s *Store) QueueRotateAgentKey(ctx context.Context, req protocol.RotateAgen
 	}
 
 	return s.enqueueTransaction(ctx, protocol.TxTypeRotateAgentKey, req.Agent, req.Auth, payload, true)
+}
+
+func (s *Store) QueueUpsertValidator(ctx context.Context, req protocol.UpsertValidatorRequest) (protocol.TransactionStatus, error) {
+	req.Operator = strings.TrimSpace(req.Operator)
+	req.Validator = strings.TrimSpace(req.Validator)
+	req.PublicKey = strings.ToLower(strings.TrimSpace(req.PublicKey))
+
+	switch {
+	case req.Operator == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: operator is required", ErrValidation)
+	case req.Validator == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: validator is required", ErrValidation)
+	case req.PublicKey == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: public_key is required", ErrValidation)
+	case req.Power <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: power must be > 0", ErrValidation)
+	}
+
+	payload := struct {
+		Operator  string `json:"operator"`
+		Validator string `json:"validator"`
+		PublicKey string `json:"public_key"`
+		Power     int64  `json:"power"`
+	}{
+		Operator:  req.Operator,
+		Validator: req.Validator,
+		PublicKey: req.PublicKey,
+		Power:     req.Power,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeUpsertValidator, req.Operator, req.Auth, payload, true)
+}
+
+func (s *Store) QueueDeactivateValidator(ctx context.Context, req protocol.DeactivateValidatorRequest) (protocol.TransactionStatus, error) {
+	req.Operator = strings.TrimSpace(req.Operator)
+	req.Validator = strings.TrimSpace(req.Validator)
+	switch {
+	case req.Operator == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: operator is required", ErrValidation)
+	case req.Validator == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: validator is required", ErrValidation)
+	}
+
+	payload := struct {
+		Operator  string `json:"operator"`
+		Validator string `json:"validator"`
+	}{
+		Operator:  req.Operator,
+		Validator: req.Validator,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeDeactivateValidator, req.Operator, req.Auth, payload, true)
+}
+
+func (s *Store) QueueOpenDispute(ctx context.Context, req protocol.OpenDisputeRequest) (protocol.TransactionStatus, error) {
+	req.TaskID = strings.TrimSpace(req.TaskID)
+	req.Challenger = strings.TrimSpace(req.Challenger)
+	req.Reason = strings.TrimSpace(req.Reason)
+
+	switch {
+	case req.TaskID == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: task_id is required", ErrValidation)
+	case req.Challenger == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: challenger is required", ErrValidation)
+	case req.Reason == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: reason is required", ErrValidation)
+	}
+
+	payload := struct {
+		TaskID     string `json:"task_id"`
+		Challenger string `json:"challenger"`
+		Reason     string `json:"reason"`
+	}{
+		TaskID:     req.TaskID,
+		Challenger: req.Challenger,
+		Reason:     req.Reason,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeOpenDispute, req.Challenger, req.Auth, payload, true)
+}
+
+func (s *Store) QueueResolveDispute(ctx context.Context, req protocol.ResolveDisputeRequest) (protocol.TransactionStatus, error) {
+	req.Resolver = strings.TrimSpace(req.Resolver)
+	req.Resolution = strings.TrimSpace(strings.ToLower(req.Resolution))
+	req.Notes = strings.TrimSpace(req.Notes)
+
+	switch {
+	case req.DisputeID <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: dispute_id must be > 0", ErrValidation)
+	case req.Resolver == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: resolver is required", ErrValidation)
+	case req.Resolution != "reject" && req.Resolution != "uphold":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: resolution must be reject or uphold", ErrValidation)
+	}
+
+	payload := struct {
+		DisputeID  int64  `json:"dispute_id"`
+		Resolver   string `json:"resolver"`
+		Resolution string `json:"resolution"`
+		Notes      string `json:"notes,omitempty"`
+	}{
+		DisputeID:  req.DisputeID,
+		Resolver:   req.Resolver,
+		Resolution: req.Resolution,
+		Notes:      req.Notes,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeResolveDispute, req.Resolver, req.Auth, payload, true)
+}
+
+func (s *Store) QueueSubmitGovernanceProposal(ctx context.Context, req protocol.SubmitGovernanceProposalRequest) (protocol.TransactionStatus, error) {
+	req.Proposer = strings.TrimSpace(req.Proposer)
+	req.ProposalType = strings.TrimSpace(req.ProposalType)
+	req.Title = strings.TrimSpace(req.Title)
+	req.Description = strings.TrimSpace(req.Description)
+	req.TargetAddress = strings.TrimSpace(req.TargetAddress)
+	req.ParameterName = strings.TrimSpace(req.ParameterName)
+	req.ParameterValue = strings.TrimSpace(req.ParameterValue)
+
+	switch {
+	case req.Proposer == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: proposer is required", ErrValidation)
+	case req.ProposalType != protocol.GovernanceProposalTreasuryTransfer && req.ProposalType != protocol.GovernanceProposalParameterChange:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: unsupported proposal_type", ErrValidation)
+	case req.Title == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: title is required", ErrValidation)
+	case req.Description == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: description is required", ErrValidation)
+	case req.VotingDeadline <= time.Now().Unix():
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: voting_deadline must be in the future", ErrValidation)
+	case req.ProposalType == protocol.GovernanceProposalTreasuryTransfer && req.TargetAddress == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: target_address is required for treasury_transfer", ErrValidation)
+	case req.ProposalType == protocol.GovernanceProposalTreasuryTransfer && req.Amount <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: amount must be > 0 for treasury_transfer", ErrValidation)
+	case req.ProposalType == protocol.GovernanceProposalParameterChange && req.ParameterName == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: parameter_name is required for parameter_change", ErrValidation)
+	case req.ProposalType == protocol.GovernanceProposalParameterChange && req.ParameterValue == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: parameter_value is required for parameter_change", ErrValidation)
+	}
+	if req.ProposalType == protocol.GovernanceProposalParameterChange {
+		if err := validateGovernanceParameterValue(req.ParameterName, req.ParameterValue); err != nil {
+			return protocol.TransactionStatus{}, err
+		}
+	}
+
+	payload := struct {
+		Proposer       string  `json:"proposer"`
+		ProposalType   string  `json:"proposal_type"`
+		Title          string  `json:"title"`
+		Description    string  `json:"description"`
+		TargetAddress  string  `json:"target_address,omitempty"`
+		Amount         float64 `json:"amount,omitempty"`
+		ParameterName  string  `json:"parameter_name,omitempty"`
+		ParameterValue string  `json:"parameter_value,omitempty"`
+		VotingDeadline int64   `json:"voting_deadline"`
+	}{
+		Proposer:       req.Proposer,
+		ProposalType:   req.ProposalType,
+		Title:          req.Title,
+		Description:    req.Description,
+		TargetAddress:  req.TargetAddress,
+		Amount:         req.Amount,
+		ParameterName:  req.ParameterName,
+		ParameterValue: req.ParameterValue,
+		VotingDeadline: req.VotingDeadline,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeSubmitGovernanceProposal, req.Proposer, req.Auth, payload, true)
+}
+
+func (s *Store) QueueSubmitGovernanceVote(ctx context.Context, req protocol.SubmitGovernanceVoteRequest) (protocol.TransactionStatus, error) {
+	req.Voter = strings.TrimSpace(req.Voter)
+	req.Vote = strings.TrimSpace(strings.ToLower(req.Vote))
+
+	switch {
+	case req.ProposalID <= 0:
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: proposal_id must be > 0", ErrValidation)
+	case req.Voter == "":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: voter is required", ErrValidation)
+	case req.Vote != "approve" && req.Vote != "reject":
+		return protocol.TransactionStatus{}, fmt.Errorf("%w: vote must be approve or reject", ErrValidation)
+	}
+
+	payload := struct {
+		ProposalID int64  `json:"proposal_id"`
+		Voter      string `json:"voter"`
+		Vote       string `json:"vote"`
+	}{
+		ProposalID: req.ProposalID,
+		Voter:      req.Voter,
+		Vote:       req.Vote,
+	}
+
+	return s.enqueueTransaction(ctx, protocol.TxTypeSubmitGovernanceVote, req.Voter, req.Auth, payload, true)
 }
 
 func (s *Store) enqueueTransaction(ctx context.Context, txType protocol.TxType, sender string, auth protocol.TxAuth, payload any, requireAuth bool) (protocol.TransactionStatus, error) {

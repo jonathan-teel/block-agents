@@ -237,17 +237,27 @@ func (s *Store) shouldAdvanceDebateStageTx(ctx context.Context, tx *sql.Tx, task
 		}
 		return count >= required
 	case protocol.DebateStageEvaluation:
-		ready, err := hasMinimumProposalEvaluationsTx(ctx, tx, task.ID, state.CurrentRound, s.cfg.MinEvaluationsPerProposal)
+		ready, err := hasMinimumProposalEvaluationsTx(ctx, tx, task.ID, state.CurrentRound, effectiveMinEvaluationsPerProposalTx(ctx, tx, s.cfg))
 		if err != nil {
 			return false
 		}
 		return ready
+	case protocol.DebateStageRebuttal:
+		count, err := countRoundRebuttalsTx(ctx, tx, task.ID, state.CurrentRound)
+		if err != nil {
+			return false
+		}
+		required := task.Input.WorkerCount
+		if required < 1 {
+			required = 1
+		}
+		return count >= required
 	case protocol.DebateStageVote:
 		count, err := countRoundVotesTx(ctx, tx, task.ID, state.CurrentRound)
 		if err != nil {
 			return false
 		}
-		required := s.cfg.MinVotesPerRound
+		required := effectiveMinVotesPerRoundTx(ctx, tx, s.cfg)
 		if task.Input.MinerCount > 0 && required > task.Input.MinerCount {
 			required = task.Input.MinerCount
 		}
@@ -326,6 +336,21 @@ func countRoundVotesTx(ctx context.Context, tx *sql.Tx, taskID string, round int
 		round,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count round votes: %w", err)
+	}
+	return count, nil
+}
+
+func countRoundRebuttalsTx(ctx context.Context, tx *sql.Tx, taskID string, round int) (int, error) {
+	var count int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(1)
+		 FROM task_rebuttals
+		 WHERE task_id = $1 AND round = $2`,
+		taskID,
+		round,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count round rebuttals: %w", err)
 	}
 	return count, nil
 }

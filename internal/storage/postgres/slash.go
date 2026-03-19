@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 
+	"aichain/internal/config"
 	"aichain/internal/execution"
 	"aichain/internal/protocol"
 )
 
-func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, nowUnix int64, slashFraction float64, reputationPenalty float64) ([]protocol.Event, error) {
+func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, cfg config.Config, nowUnix int64, slashFraction float64, reputationPenalty float64) ([]protocol.Event, error) {
 	rows, err := tx.QueryContext(
 		ctx,
 		`SELECT id, validator, evidence_type
@@ -91,6 +92,9 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, nowUnix 
 		); err != nil {
 			return nil, fmt.Errorf("apply slash to validator %s: %w", item.Validator, err)
 		}
+		if err := creditTreasuryTx(ctx, tx, cfg, balancePenalty); err != nil {
+			return nil, err
+		}
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE consensus_evidence
@@ -113,6 +117,7 @@ func applyConsensusEvidencePenaltiesTx(ctx context.Context, tx *sql.Tx, nowUnix 
 				"evidence_type":       item.EvidenceType,
 				"balance_penalty":     formatFloat(balancePenalty),
 				"reputation_penalty":  formatFloat(reputationPenalty),
+				"treasury":            cfg.TreasuryAddress,
 			},
 		})
 	}

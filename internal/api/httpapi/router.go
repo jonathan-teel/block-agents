@@ -9,11 +9,11 @@ import (
 	"aichain/internal/storage/postgres"
 )
 
-func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, engine *consensus.Engine) *gin.Engine {
+func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, engine *consensus.Engine, syncProvider SyncStatusProvider) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
-	handler := NewHandler(store, cfg, peers, engine)
+	handler := NewHandler(store, cfg, peers, engine, syncProvider)
 
 	router.GET("/healthz", handler.Health)
 
@@ -26,6 +26,8 @@ func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, eng
 	router.GET("/v1/agents/:address", handler.GetAgent)
 	router.GET("/v1/p2p/status", handler.GetPeerStatus)
 	router.GET("/v1/p2p/peers", handler.ListPeers)
+	router.GET("/v1/p2p/telemetry", handler.ListPeerTelemetry)
+	router.GET("/v1/sync/status", handler.GetSyncStatus)
 	router.GET("/v1/p2p/candidates/:hash", handler.GetCandidateBlockByHash)
 	router.GET("/v1/p2p/state/snapshot", handler.ExportStateSnapshot)
 	router.GET("/v1/p2p/blocks/certified", handler.GetCertifiedBlocksRange)
@@ -35,14 +37,24 @@ func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, eng
 	router.GET("/v1/consensus/fork-choice", handler.ListForkChoice)
 	router.GET("/v1/consensus/round-changes", handler.ListRoundChanges)
 	router.GET("/v1/consensus/evidence", handler.ListEvidence)
+	router.GET("/v1/governance/proposals", handler.ListGovernanceProposals)
+	router.GET("/v1/governance/parameters", handler.ListGovernanceParameters)
+	router.GET("/v1/governance/votes", handler.ListGovernanceVotes)
 	router.POST("/v1/txs/tasks", handler.CreateTaskTx)
 	router.POST("/v1/txs/submissions", handler.CreateSubmissionTx)
 	router.POST("/v1/txs/proposals", handler.CreateProposalTx)
 	router.POST("/v1/txs/evaluations", handler.CreateEvaluationTx)
+	router.POST("/v1/txs/rebuttals", handler.CreateRebuttalTx)
 	router.POST("/v1/txs/votes", handler.CreateVoteTx)
 	router.POST("/v1/txs/proofs", handler.CreateProofTx)
 	router.POST("/v1/txs/agent/bootstrap", handler.BootstrapAgentKeyTx)
 	router.POST("/v1/txs/agent/rotate-key", handler.RotateAgentKeyTx)
+	router.POST("/v1/txs/validators/upsert", handler.UpsertValidatorTx)
+	router.POST("/v1/txs/validators/deactivate", handler.DeactivateValidatorTx)
+	router.POST("/v1/txs/disputes/open", handler.OpenDisputeTx)
+	router.POST("/v1/txs/disputes/resolve", handler.ResolveDisputeTx)
+	router.POST("/v1/txs/governance/proposals", handler.SubmitGovernanceProposalTx)
+	router.POST("/v1/txs/governance/votes", handler.SubmitGovernanceVoteTx)
 	router.POST("/v1/p2p/hello", handler.PeerHello)
 	router.POST("/v1/p2p/consensus/proposals", handler.ReceiveConsensusProposal)
 	router.POST("/v1/p2p/consensus/votes", handler.ReceiveConsensusVote)

@@ -9,6 +9,11 @@
       "reputation": 1
     },
     {
+      "address": "treasury",
+      "balance": 0,
+      "reputation": 1
+    },
+    {
       "address": "alice",
       "balance": 10000,
       "reputation": 0.65

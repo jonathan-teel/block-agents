@@ -56,6 +56,8 @@ func (s *Store) executeTransaction(ctx context.Context, tx *sql.Tx, pending pend
 		return s.executeProposalTx(ctx, tx, pending, nowUnix)
 	case protocol.TxTypeSubmitEvaluation:
 		return s.executeEvaluationTx(ctx, tx, pending, nowUnix)
+	case protocol.TxTypeSubmitRebuttal:
+		return s.executeRebuttalTx(ctx, tx, pending, nowUnix)
 	case protocol.TxTypeSubmitVote:
 		return s.executeVoteTx(ctx, tx, pending, nowUnix)
 	case protocol.TxTypeSubmitProof:
@@ -66,6 +68,18 @@ func (s *Store) executeTransaction(ctx context.Context, tx *sql.Tx, pending pend
 		return s.executeBootstrapAgentKeyTx(ctx, tx, pending)
 	case protocol.TxTypeRotateAgentKey:
 		return s.executeRotateAgentKeyTx(ctx, tx, pending)
+	case protocol.TxTypeUpsertValidator:
+		return s.executeUpsertValidatorTx(ctx, tx, pending)
+	case protocol.TxTypeDeactivateValidator:
+		return s.executeDeactivateValidatorTx(ctx, tx, pending)
+	case protocol.TxTypeOpenDispute:
+		return s.executeOpenDisputeTx(ctx, tx, pending, nowUnix)
+	case protocol.TxTypeResolveDispute:
+		return s.executeResolveDisputeTx(ctx, tx, pending)
+	case protocol.TxTypeSubmitGovernanceProposal:
+		return s.executeSubmitGovernanceProposalTx(ctx, tx, pending, nowUnix)
+	case protocol.TxTypeSubmitGovernanceVote:
+		return s.executeSubmitGovernanceVoteTx(ctx, tx, pending, nowUnix)
 	default:
 		return nil, fmt.Errorf("unsupported transaction type %q", pending.Type)
 	}
@@ -83,7 +97,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 		payload.Type = protocol.TaskTypePrediction
 	}
 	if payload.RoleSelectionPolicy == "" {
-		payload.RoleSelectionPolicy = s.cfg.RoleSelectionPolicy
+		payload.RoleSelectionPolicy = effectiveRoleSelectionPolicyTx(ctx, tx, s.cfg)
 	}
 
 	if payload.Deadline <= nowUnix {
@@ -113,8 +127,8 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 	taskID := uuid.NewString()
 	if _, err := tx.ExecContext(
 		ctx,
-		`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		taskID,
 		payload.Creator,
 		payload.Type,
@@ -124,6 +138,9 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 		payload.WorkerCount,
 		payload.MinerCount,
 		payload.RoleSelectionPolicy,
+		payload.OracleSource,
+		payload.OracleEndpoint,
+		payload.OraclePath,
 		payload.RewardPool,
 		payload.MinStake,
 		protocol.StatusOpen,
@@ -142,6 +159,9 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 			WorkerCount:  payload.WorkerCount,
 			MinerCount:   payload.MinerCount,
 			RoleSelectionPolicy: payload.RoleSelectionPolicy,
+			OracleSource: payload.OracleSource,
+			OracleEndpoint: payload.OracleEndpoint,
+			OraclePath: payload.OraclePath,
 		},
 		RewardPool: payload.RewardPool,
 		MinStake:   payload.MinStake,
@@ -158,6 +178,7 @@ func (s *Store) executeCreateTaskTx(ctx context.Context, tx *sql.Tx, pending pen
 				"reward_pool": formatFloat(payload.RewardPool),
 				"deadline":    strconv.FormatInt(payload.Deadline, 10),
 				"role_selection_policy": payload.RoleSelectionPolicy,
+				"oracle_source": payload.OracleSource,
 			},
 		},
 	}
@@ -188,6 +209,9 @@ func (s *Store) executeSubmissionTx(ctx context.Context, tx *sql.Tx, pending pen
 	task, err := getTaskForUpdate(ctx, tx, payload.TaskID)
 	if err != nil {
 		return nil, err
+	}
+	if task.Type != protocol.TaskTypePrediction && task.Type != protocol.TaskTypeOraclePrediction {
+		return nil, fmt.Errorf("%w: submissions are only valid for prediction-family tasks", ErrValidation)
 	}
 	if task.Status != protocol.StatusOpen {
 		return nil, fmt.Errorf("%w: task is not open", ErrValidation)
@@ -429,6 +453,104 @@ func (s *Store) executeEvaluationTx(ctx context.Context, tx *sql.Tx, pending pen
 	return events, nil
 }
 
+func (s *Store) executeRebuttalTx(ctx context.Context, tx *sql.Tx, pending pendingTx, nowUnix int64) ([]protocol.Event, error) {
+	var payload protocol.SubmitRebuttalRequest
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode submit_rebuttal payload: %w", err)
+	}
+	if pending.Sender != payload.Agent {
+		return nil, fmt.Errorf("%w: sender does not match agent", ErrValidation)
+	}
+
+	task, err := getTaskForUpdate(ctx, tx, payload.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.Type != protocol.TaskTypeBlockAgents {
+		return nil, fmt.Errorf("%w: rebuttals are only valid for blockagents tasks", ErrValidation)
+	}
+	if task.Status != protocol.StatusOpen {
+		return nil, fmt.Errorf("%w: task is not open", ErrValidation)
+	}
+	if task.Input.Deadline <= nowUnix {
+		return nil, fmt.Errorf("%w: task deadline has passed", ErrValidation)
+	}
+	if payload.Round > task.Input.DebateRounds {
+		return nil, fmt.Errorf("%w: round exceeds debate_rounds", ErrValidation)
+	}
+	if _, err := requireDebateStageTx(ctx, tx, task, payload.Round, protocol.DebateStageRebuttal); err != nil {
+		return nil, err
+	}
+	if !hasRoleTx(ctx, tx, payload.TaskID, payload.Agent, protocol.RoleWorker) {
+		return nil, fmt.Errorf("%w: agent is not assigned as a worker", ErrValidation)
+	}
+	hasProof, err := hasProofForStageTx(ctx, tx, payload.TaskID, payload.Agent, payload.Round, protocol.DebateStageRebuttal)
+	if err != nil {
+		return nil, err
+	}
+	if !hasProof {
+		return nil, fmt.Errorf("%w: proof-of-thought artifact required before rebuttal submission", ErrValidation)
+	}
+
+	var proposalRound int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT round
+		 FROM task_proposals
+		 WHERE id = $1 AND task_id = $2`,
+		payload.ProposalID,
+		payload.TaskID,
+	).Scan(&proposalRound); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("query proposal for rebuttal: %w", err)
+	}
+	if proposalRound != payload.Round {
+		return nil, fmt.Errorf("%w: proposal round mismatch", ErrValidation)
+	}
+
+	var rebuttalID int64
+	if err := tx.QueryRowContext(
+		ctx,
+		`INSERT INTO task_rebuttals (task_id, proposal_id, agent, round, content)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id`,
+		payload.TaskID,
+		payload.ProposalID,
+		payload.Agent,
+		payload.Round,
+		payload.Content,
+	).Scan(&rebuttalID); err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: worker already submitted a rebuttal for this round", ErrValidation)
+		}
+		return nil, fmt.Errorf("insert rebuttal: %w", err)
+	}
+
+	events := []protocol.Event{
+		{
+			Type: "rebuttal.submitted",
+			Attributes: map[string]string{
+				"task_id":     payload.TaskID,
+				"rebuttal_id": strconv.FormatInt(rebuttalID, 10),
+				"proposal_id": strconv.FormatInt(payload.ProposalID, 10),
+				"agent":       payload.Agent,
+				"round":       strconv.Itoa(payload.Round),
+			},
+		},
+	}
+	if s.cfg.AllowEarlyDebateAdvance {
+		advanceEvents, err := s.maybeAdvanceDebateStateTx(ctx, tx, task, nowUnix)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, advanceEvents...)
+	}
+
+	return events, nil
+}
+
 func (s *Store) executeVoteTx(ctx context.Context, tx *sql.Tx, pending pendingTx, nowUnix int64) ([]protocol.Event, error) {
 	var payload protocol.SubmitVoteRequest
 	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
@@ -549,7 +671,7 @@ func (s *Store) executeProofTx(ctx context.Context, tx *sql.Tx, pending pendingT
 	if payload.Round > task.Input.DebateRounds {
 		return nil, fmt.Errorf("%w: round exceeds debate_rounds", ErrValidation)
 	}
-	if payload.Stage != protocol.DebateStageProposal && payload.Stage != protocol.DebateStageEvaluation && payload.Stage != protocol.DebateStageVote {
+	if payload.Stage != protocol.DebateStageProposal && payload.Stage != protocol.DebateStageEvaluation && payload.Stage != protocol.DebateStageRebuttal && payload.Stage != protocol.DebateStageVote {
 		return nil, fmt.Errorf("%w: unsupported proof stage", ErrValidation)
 	}
 	if _, err := requireDebateStageTx(ctx, tx, task, payload.Round, payload.Stage); err != nil {
@@ -557,7 +679,7 @@ func (s *Store) executeProofTx(ctx context.Context, tx *sql.Tx, pending pendingT
 	}
 
 	expectedRole := protocol.RoleMiner
-	if payload.Stage == protocol.DebateStageProposal {
+	if payload.Stage == protocol.DebateStageProposal || payload.Stage == protocol.DebateStageRebuttal {
 		expectedRole = protocol.RoleWorker
 	}
 	if !hasRoleTx(ctx, tx, payload.TaskID, payload.Agent, expectedRole) {
@@ -790,6 +912,69 @@ func (s *Store) executeRotateAgentKeyTx(ctx context.Context, tx *sql.Tx, pending
 	}, nil
 }
 
+func (s *Store) executeUpsertValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
+	var payload protocol.UpsertValidatorRequest
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode upsert_validator payload: %w", err)
+	}
+	if pending.Sender != payload.Operator {
+		return nil, fmt.Errorf("%w: sender does not match operator", ErrValidation)
+	}
+
+	active, err := isActiveValidatorTx(ctx, tx, payload.Operator)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, fmt.Errorf("%w: operator is not an active validator", ErrUnauthorized)
+	}
+	if err := upsertValidatorRegistryTx(ctx, tx, payload.Validator, payload.PublicKey, payload.Power, s.cfg.DefaultAgentReputation); err != nil {
+		return nil, err
+	}
+
+	return []protocol.Event{
+		{
+			Type: "validator.upserted",
+			Attributes: map[string]string{
+				"operator":  payload.Operator,
+				"validator": payload.Validator,
+				"power":     strconv.FormatInt(payload.Power, 10),
+			},
+		},
+	}, nil
+}
+
+func (s *Store) executeDeactivateValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
+	var payload protocol.DeactivateValidatorRequest
+	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("decode deactivate_validator payload: %w", err)
+	}
+	if pending.Sender != payload.Operator {
+		return nil, fmt.Errorf("%w: sender does not match operator", ErrValidation)
+	}
+
+	active, err := isActiveValidatorTx(ctx, tx, payload.Operator)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, fmt.Errorf("%w: operator is not an active validator", ErrUnauthorized)
+	}
+	if err := deactivateValidatorRegistryTx(ctx, tx, payload.Validator); err != nil {
+		return nil, err
+	}
+
+	return []protocol.Event{
+		{
+			Type: "validator.deactivated",
+			Attributes: map[string]string{
+				"operator":  payload.Operator,
+				"validator": payload.Validator,
+			},
+		},
+	}, nil
+}
+
 func updateConsensusTx(ctx context.Context, tx *sql.Tx, maxEffectiveWeight float64) ([]protocol.Event, error) {
 	rows, err := tx.QueryContext(
 		ctx,
@@ -823,7 +1008,7 @@ func updateConsensusTx(ctx context.Context, tx *sql.Tx, maxEffectiveWeight float
 
 	events := make([]protocol.Event, 0)
 	for _, taskRef := range taskRefs {
-		if taskRef.Type != protocol.TaskTypePrediction {
+		if taskRef.Type != protocol.TaskTypePrediction && taskRef.Type != protocol.TaskTypeOraclePrediction {
 			continue
 		}
 
@@ -923,7 +1108,13 @@ func (s *Store) settleExpiredTasksTx(ctx context.Context, tx *sql.Tx, nowUnix in
 }
 
 func (s *Store) settlePredictionTaskTx(ctx context.Context, tx *sql.Tx, task protocol.Task) ([]protocol.Event, error) {
-	outcome := execution.ResolveOutcome(task)
+	outcome, outcomeSource, ok, err := resolvePredictionOutcomeTx(ctx, tx, task)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
 	submissions, err := listWeightedSubmissionsTx(ctx, tx, task.ID)
 	if err != nil {
 		return nil, err
@@ -997,6 +1188,7 @@ func (s *Store) settlePredictionTaskTx(ctx context.Context, tx *sql.Tx, task pro
 				"task_id":     task.ID,
 				"task_type":   task.Type,
 				"outcome":     formatFloat(outcome),
+				"outcome_source": outcomeSource,
 				"submissions": strconv.Itoa(len(submissions)),
 			},
 		},
@@ -1040,6 +1232,7 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 		}
 	}
 	var winning *proposalScore
+	minerVotePolicy := effectiveMinerVotePolicyTx(ctx, tx, s.cfg)
 	for _, proposal := range proposals {
 		if proposal.Round != latestRound {
 			continue
@@ -1048,7 +1241,7 @@ func (s *Store) settleBlockAgentsTaskTx(ctx context.Context, tx *sql.Tx, task pr
 		if err != nil {
 			return nil, err
 		}
-		votes, votePower, err := countProposalVotesTx(ctx, tx, task.ID, proposal.ID, proposal.Round, s.cfg.MinerVotePolicy)
+		votes, votePower, err := countProposalVotesTx(ctx, tx, task.ID, proposal.ID, proposal.Round, minerVotePolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -1337,6 +1530,7 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 		Agent  string
 		Weight float64
 	}
+	votePolicy := effectiveMinerVotePolicyTx(ctx, tx, s.cfg)
 	miners := make([]minerReward, 0)
 	for rows.Next() {
 		var entry minerReward
@@ -1344,7 +1538,7 @@ func (s *Store) distributeMinerRewardsTx(ctx context.Context, tx *sql.Tx, taskID
 		if err := rows.Scan(&entry.Agent, &reputation); err != nil {
 			return fmt.Errorf("scan winning proposal voter: %w", err)
 		}
-		if s.cfg.MinerVotePolicy == "one_agent_one_vote" {
+		if votePolicy == "one_agent_one_vote" {
 			entry.Weight = 1
 		} else {
 			entry.Weight = execution.Clamp01(reputation)

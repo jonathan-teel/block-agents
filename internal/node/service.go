@@ -11,6 +11,7 @@ import (
 	"aichain/internal/config"
 	"aichain/internal/consensus"
 	"aichain/internal/network/p2p"
+	"aichain/internal/oracle"
 	"aichain/internal/protocol"
 	"aichain/internal/storage/postgres"
 )
@@ -21,6 +22,8 @@ type Service struct {
 	peers     *p2p.Manager
 	engine    *consensus.Engine
 	sequencer *consensus.Sequencer
+	syncTracker *SyncTracker
+	oracles   *oracle.Registry
 	server    *http.Server
 }
 
@@ -30,7 +33,12 @@ func New(cfg config.Config) (*Service, error) {
 		return nil, err
 	}
 
-	peers := p2p.New(cfg.P2PListenAddr)
+	peers := p2p.New(cfg.P2PListenAddr, p2p.Options{
+		BaseBackoff:       cfg.PeerBaseBackoff,
+		MaxBackoff:        cfg.PeerMaxBackoff,
+		BroadcastDedupTTL: cfg.PeerBroadcastDedupTTL,
+		HelloMinInterval:  cfg.PeerHelloMinInterval,
+	})
 	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	knownPeers, err := store.ListKnownPeers(loadCtx, 256)
@@ -56,7 +64,8 @@ func New(cfg config.Config) (*Service, error) {
 		return nil, err
 	}
 
-	router := httpapi.NewRouter(store, cfg, peers, engine)
+	syncTracker := NewSyncTracker()
+	router := httpapi.NewRouter(store, cfg, peers, engine, syncTracker)
 	server := &http.Server{
 		Addr:              normalizeListenAddr(cfg.Port),
 		Handler:           router,
@@ -69,6 +78,8 @@ func New(cfg config.Config) (*Service, error) {
 		peers:     peers,
 		engine:    engine,
 		sequencer: consensus.New(cfg, store, engine),
+		syncTracker: syncTracker,
+		oracles:   oracle.Default(cfg.OracleHTTPTimeout, cfg.AllowPrivateOracleEndpoints),
 		server:    server,
 	}, nil
 }
@@ -78,6 +89,7 @@ func (s *Service) Run(ctx context.Context) error {
 	go s.announceSelf(ctx)
 	go s.discoveryLoop(ctx)
 	go s.syncLoop(ctx)
+	go s.oracleLoop(ctx)
 	go s.engine.RunTimeoutLoop(ctx)
 
 	go func() {
@@ -115,13 +127,41 @@ func (s *Service) announceSelf(ctx context.Context) {
 	defer ticker.Stop()
 
 	send := func() {
-		s.peers.BroadcastHello(ctx, protocol.PeerHello{
+		info, err := s.store.GetChainInfo(ctx)
+		if err != nil {
+			info = protocol.ChainInfo{ChainID: s.cfg.ChainID}
+		}
+		status := protocol.PeerStatus{
 			NodeID:           s.cfg.NodeID,
 			ChainID:          s.cfg.ChainID,
 			ListenAddr:       s.cfg.P2PListenAddr,
 			ValidatorAddress: s.cfg.ValidatorAddress,
-			SeenAt:           time.Now().UTC(),
-		})
+			HeadHeight:       info.HeadHeight,
+			HeadHash:         info.HeadHash,
+			ObservedAt:       time.Now().UTC(),
+		}
+		if s.engine != nil {
+			signedStatus, err := s.engine.SignPeerStatus(status)
+			if err == nil {
+				status = signedStatus
+			}
+		}
+		s.peers.RememberPeer(status)
+
+		hello := protocol.PeerHello{
+			NodeID:           s.cfg.NodeID,
+			ChainID:          s.cfg.ChainID,
+			ListenAddr:       s.cfg.P2PListenAddr,
+			ValidatorAddress: s.cfg.ValidatorAddress,
+			SeenAt:           status.ObservedAt,
+		}
+		if s.engine != nil {
+			signed, err := s.engine.SignPeerHello(hello)
+			if err == nil {
+				hello = signed
+			}
+		}
+		s.peers.BroadcastHello(ctx, hello)
 	}
 
 	send()

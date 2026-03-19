@@ -20,14 +20,20 @@ type Handler struct {
 	cfg    config.Config
 	peers  *p2p.Manager
 	engine *consensus.Engine
+	syncProvider SyncStatusProvider
 }
 
-func NewHandler(store *postgres.Store, cfg config.Config, peers *p2p.Manager, engine *consensus.Engine) *Handler {
+type SyncStatusProvider interface {
+	SyncStatus() protocol.SyncStatus
+}
+
+func NewHandler(store *postgres.Store, cfg config.Config, peers *p2p.Manager, engine *consensus.Engine, syncProvider SyncStatusProvider) *Handler {
 	return &Handler{
 		store:  store,
 		cfg:    cfg,
 		peers:  peers,
 		engine: engine,
+		syncProvider: syncProvider,
 	}
 }
 
@@ -133,7 +139,7 @@ func (h *Handler) GetPeerStatus(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, protocol.PeerStatus{
+	status := protocol.PeerStatus{
 		NodeID:           h.cfg.NodeID,
 		ChainID:          h.cfg.ChainID,
 		ListenAddr:       h.cfg.P2PListenAddr,
@@ -141,7 +147,17 @@ func (h *Handler) GetPeerStatus(c *gin.Context) {
 		HeadHeight:       info.HeadHeight,
 		HeadHash:         info.HeadHash,
 		ObservedAt:       nowUTC(),
-	})
+	}
+	if h.engine != nil {
+		signed, err := h.engine.SignPeerStatus(status)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to sign peer status"})
+			return
+		}
+		status = signed
+	}
+
+	c.JSON(http.StatusOK, status)
 }
 
 func (h *Handler) ListPeers(c *gin.Context) {
@@ -149,7 +165,23 @@ func (h *Handler) ListPeers(c *gin.Context) {
 		c.JSON(http.StatusOK, []protocol.PeerStatus{})
 		return
 	}
-	c.JSON(http.StatusOK, h.peers.Peers())
+	c.JSON(http.StatusOK, h.peers.AdmittedPeers())
+}
+
+func (h *Handler) ListPeerTelemetry(c *gin.Context) {
+	if h.peers == nil {
+		c.JSON(http.StatusOK, []protocol.PeerTelemetry{})
+		return
+	}
+	c.JSON(http.StatusOK, h.peers.PeerTelemetry())
+}
+
+func (h *Handler) GetSyncStatus(c *gin.Context) {
+	if h.syncProvider == nil {
+		c.JSON(http.StatusOK, protocol.SyncStatus{})
+		return
+	}
+	c.JSON(http.StatusOK, h.syncProvider.SyncStatus())
 }
 
 func (h *Handler) ExportStateSnapshot(c *gin.Context) {
@@ -216,6 +248,43 @@ func (h *Handler) ListRoundChanges(c *gin.Context) {
 	c.JSON(http.StatusOK, messages)
 }
 
+func (h *Handler) ListGovernanceProposals(c *gin.Context) {
+	proposals, err := h.store.ListGovernanceProposals(c.Request.Context(), 100)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, proposals)
+}
+
+func (h *Handler) ListGovernanceParameters(c *gin.Context) {
+	parameters, err := h.store.ListGovernanceParameters(c.Request.Context())
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, parameters)
+}
+
+func (h *Handler) ListGovernanceVotes(c *gin.Context) {
+	var proposalID *int64
+	if raw := c.Query("proposal_id"); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "proposal_id must be a positive integer"})
+			return
+		}
+		proposalID = &value
+	}
+
+	votes, err := h.store.ListGovernanceVotes(c.Request.Context(), proposalID)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, votes)
+}
+
 func (h *Handler) GetCertifiedBlockByHeight(c *gin.Context) {
 	height, err := strconv.ParseInt(c.Param("height"), 10, 64)
 	if err != nil || height < 0 {
@@ -270,13 +339,24 @@ func (h *Handler) PeerHello(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if h.engine != nil {
+		if err := h.engine.VerifyPeerHello(hello); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	if h.peers != nil {
+		if !h.peers.AllowHello(hello.NodeID, hello.SeenAt) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "peer hello rate limit exceeded"})
+			return
+		}
 		status := protocol.PeerStatus{
 			NodeID:           hello.NodeID,
 			ChainID:          hello.ChainID,
 			ListenAddr:       hello.ListenAddr,
 			ValidatorAddress: hello.ValidatorAddress,
 			ObservedAt:       hello.SeenAt,
+			Signature:        hello.Signature,
 		}
 		h.peers.RememberPeer(status)
 		_ = h.store.UpsertPeer(c.Request.Context(), status)
@@ -354,6 +434,10 @@ func (h *Handler) ImportCertifiedBlock(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	if err := h.engine.ReloadValidatorSet(c.Request.Context()); err != nil {
+		writeError(c, err)
+		return
+	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "imported"})
 }
 
@@ -367,13 +451,15 @@ func (h *Handler) ImportStateSnapshot(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "consensus engine unavailable"})
 		return
 	}
-	for _, bundle := range snapshot.CertifiedWindow {
-		if err := h.engine.VerifyCertifiedBlock(bundle); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+	if err := h.engine.VerifyCertifiedBranch(snapshot.CertifiedWindow); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	if err := h.store.ImportStateSnapshot(c.Request.Context(), snapshot); err != nil {
+		writeError(c, err)
+		return
+	}
+	if err := h.engine.ReloadValidatorSet(c.Request.Context()); err != nil {
 		writeError(c, err)
 		return
 	}
@@ -436,6 +522,22 @@ func (h *Handler) CreateEvaluationTx(c *gin.Context) {
 	}
 
 	status, err := h.store.QueueEvaluation(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) CreateRebuttalTx(c *gin.Context) {
+	var req protocol.SubmitRebuttalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueRebuttal(c.Request.Context(), req)
 	if err != nil {
 		writeError(c, err)
 		return
@@ -516,6 +618,102 @@ func (h *Handler) RotateAgentKeyTx(c *gin.Context) {
 	}
 
 	status, err := h.store.QueueRotateAgentKey(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) UpsertValidatorTx(c *gin.Context) {
+	var req protocol.UpsertValidatorRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueUpsertValidator(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) DeactivateValidatorTx(c *gin.Context) {
+	var req protocol.DeactivateValidatorRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueDeactivateValidator(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) OpenDisputeTx(c *gin.Context) {
+	var req protocol.OpenDisputeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueOpenDispute(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) ResolveDisputeTx(c *gin.Context) {
+	var req protocol.ResolveDisputeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueResolveDispute(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) SubmitGovernanceProposalTx(c *gin.Context) {
+	var req protocol.SubmitGovernanceProposalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueSubmitGovernanceProposal(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, status)
+}
+
+func (h *Handler) SubmitGovernanceVoteTx(c *gin.Context) {
+	var req protocol.SubmitGovernanceVoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	status, err := h.store.QueueSubmitGovernanceVote(c.Request.Context(), req)
 	if err != nil {
 		writeError(c, err)
 		return

@@ -184,3 +184,40 @@ func TestVotePreferenceClaimRequiresProposalReference(t *testing.T) {
 		t.Fatal("expected vote preference without proposal reference to fail")
 	}
 }
+
+func TestRebuttalArtifactRequiresProposalOrEvaluationReference(t *testing.T) {
+	content := `{
+		"schema_version": 1,
+		"summary": "rebuttal reasoning",
+		"claims": [
+			{"kind": "counter", "statement": "the critique overstates the weakness", "reference_ids": [3]}
+		],
+		"references": [
+			{"type": "proof", "id": 3}
+		],
+		"conclusion": "the proposal remains viable"
+	}`
+
+	if _, err := VerifyArtifact("rebuttal", "response", content); err == nil {
+		t.Fatal("expected rebuttal-stage proof without proposal or evaluation reference to fail")
+	}
+}
+
+func TestRebuttalClarificationArtifactPasses(t *testing.T) {
+	content := `{
+		"schema_version": 1,
+		"summary": "rebuttal clarification",
+		"claims": [
+			{"kind": "clarification", "statement": "the proposal already covers the cited issue", "reference_ids": [1, 2]}
+		],
+		"references": [
+			{"type": "proposal", "id": 1},
+			{"type": "evaluation", "id": 2}
+		],
+		"conclusion": "the criticism is addressed"
+	}`
+
+	if _, err := VerifyArtifact("rebuttal", "clarification", content); err != nil {
+		t.Fatalf("expected rebuttal clarification proof to pass, got %v", err)
+	}
+}

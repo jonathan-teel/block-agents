@@ -209,6 +209,8 @@ func isAllowedArtifactType(stage string, artifactType string) bool {
 		return artifactType == "draft" || artifactType == "plan" || artifactType == "evidence"
 	case protocol.DebateStageEvaluation:
 		return artifactType == "critique" || artifactType == "evidence" || artifactType == "score_justification"
+	case protocol.DebateStageRebuttal:
+		return artifactType == "response" || artifactType == "clarification" || artifactType == "evidence"
 	case protocol.DebateStageVote:
 		return artifactType == "ballot_rationale" || artifactType == "ranking"
 	default:
@@ -217,7 +219,7 @@ func isAllowedArtifactType(stage string, artifactType string) bool {
 }
 
 func requiresReferences(stage string, artifactType string) bool {
-	if stage == protocol.DebateStageEvaluation || stage == protocol.DebateStageVote {
+	if stage == protocol.DebateStageEvaluation || stage == protocol.DebateStageRebuttal || stage == protocol.DebateStageVote {
 		return true
 	}
 	return artifactType == "evidence"
@@ -229,6 +231,8 @@ func isAllowedClaimKind(stage string, kind string) bool {
 		return kind == "observation" || kind == "hypothesis" || kind == "plan" || kind == "evidence"
 	case protocol.DebateStageEvaluation:
 		return kind == "evidence" || kind == "critique" || kind == "score" || kind == "consistency"
+	case protocol.DebateStageRebuttal:
+		return kind == "counter" || kind == "clarification" || kind == "evidence" || kind == "support"
 	case protocol.DebateStageVote:
 		return kind == "ranking" || kind == "support" || kind == "preference"
 	default:
@@ -282,6 +286,34 @@ func validateStageSemantics(stage string, artifactType string, document Document
 		}
 		if !hasReferenceType(document.References, "proposal") && !hasReferenceType(document.References, "proof") {
 			return fmt.Errorf("evaluation-stage proofs must reference at least one proposal or proof")
+		}
+		return nil
+	case protocol.DebateStageRebuttal:
+		if artifactType == "response" && !hasClaimKind(document.Claims, "counter") && !hasClaimKind(document.Claims, "clarification") {
+			return fmt.Errorf("rebuttal response artifacts must include counter or clarification claims")
+		}
+		if artifactType == "clarification" && !hasClaimKind(document.Claims, "clarification") {
+			return fmt.Errorf("rebuttal clarification artifacts must include clarification claims")
+		}
+		if artifactType == "evidence" && !hasClaimKind(document.Claims, "evidence") {
+			return fmt.Errorf("rebuttal evidence artifacts must include at least one evidence claim")
+		}
+		if !hasClaimKind(document.Claims, "counter") && !hasClaimKind(document.Claims, "clarification") && !hasClaimKind(document.Claims, "evidence") && !hasClaimKind(document.Claims, "support") {
+			return fmt.Errorf("rebuttal-stage proofs must include counter, clarification, evidence, or support claims")
+		}
+		if (hasClaimKind(document.Claims, "counter") || hasClaimKind(document.Claims, "evidence") || hasClaimKind(document.Claims, "support")) &&
+			!(hasClaimReferenceKind(document.Claims, "counter") || hasClaimReferenceKind(document.Claims, "evidence") || hasClaimReferenceKind(document.Claims, "support")) {
+			return fmt.Errorf("rebuttal-stage counter, evidence, and support claims must bind to reference_ids")
+		}
+		if err := validateReferenceTypes(document.References, map[string]struct{}{
+			"proposal":   {},
+			"evaluation": {},
+			"proof":      {},
+		}); err != nil {
+			return err
+		}
+		if !hasReferenceType(document.References, "proposal") && !hasReferenceType(document.References, "evaluation") {
+			return fmt.Errorf("rebuttal-stage proofs must reference at least one proposal or evaluation")
 		}
 		return nil
 	case protocol.DebateStageVote:
@@ -344,6 +376,20 @@ func validateClaimReferenceSemantics(stage string, document Document) error {
 					return fmt.Errorf("evaluation consistency claims must bind at least two references")
 				}
 				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "proof"); err != nil {
+					return err
+				}
+			}
+		case protocol.DebateStageRebuttal:
+			switch claim.Kind {
+			case "counter", "evidence", "support":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "evaluation", "proof"); err != nil {
+					return err
+				}
+				if !claimHasReferenceType(claim, referencesByID, "proposal") && !claimHasReferenceType(claim, referencesByID, "evaluation") {
+					return fmt.Errorf("rebuttal %s claims must bind at least one proposal or evaluation reference", claim.Kind)
+				}
+			case "clarification":
+				if err := requireClaimReferenceTypes(index, claim, referencesByID, "proposal", "evaluation", "proof"); err != nil {
 					return err
 				}
 			}

@@ -37,7 +37,7 @@ func (s *Store) ExportStateSnapshot(ctx context.Context, window int) (protocol.S
 		}
 	}
 
-	validators, err := s.ListValidators(ctx)
+	validators, err := s.ListValidatorRegistry(ctx)
 	if err != nil {
 		return protocol.StateSnapshot{}, err
 	}
@@ -80,6 +80,10 @@ func (s *Store) ExportStateSnapshot(ctx context.Context, window int) (protocol.S
 	if err != nil {
 		return protocol.StateSnapshot{}, err
 	}
+	rebuttals, err := listAllRebuttalsTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
 	votes, err := listAllVotesTx(ctx, tx)
 	if err != nil {
 		return protocol.StateSnapshot{}, err
@@ -89,6 +93,26 @@ func (s *Store) ExportStateSnapshot(ctx context.Context, window int) (protocol.S
 		return protocol.StateSnapshot{}, err
 	}
 	results, err := listAllResultsTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	disputes, err := listAllDisputesTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	oracleReports, err := listAllOracleReportsTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	governanceParameters, err := listAllGovernanceParametersTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	governanceProposals, err := listAllGovernanceProposalsTx(ctx, tx)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
+	governanceVotes, err := listAllGovernanceVotesTx(ctx, tx)
 	if err != nil {
 		return protocol.StateSnapshot{}, err
 	}
@@ -115,9 +139,15 @@ func (s *Store) ExportStateSnapshot(ctx context.Context, window int) (protocol.S
 		Submissions:        submissions,
 		Proposals:          proposals,
 		Evaluations:        evaluations,
+		Rebuttals:          rebuttals,
 		Votes:              votes,
 		Proofs:             proofs,
 		Results:            results,
+		Disputes:           disputes,
+		OracleReports:      oracleReports,
+		GovernanceParameters: governanceParameters,
+		GovernanceProposals: governanceProposals,
+		GovernanceVotes:    governanceVotes,
 		ConsensusEvidence:  evidence,
 		ConsensusRounds:    roundChanges,
 		ExportedAt:         time.Now().UTC(),
@@ -196,6 +226,9 @@ func (s *Store) ImportStateSnapshot(ctx context.Context, snapshot protocol.State
 	if err := importEvaluationsTx(ctx, tx, snapshot.Evaluations); err != nil {
 		return err
 	}
+	if err := importRebuttalsTx(ctx, tx, snapshot.Rebuttals); err != nil {
+		return err
+	}
 	if err := importVotesTx(ctx, tx, snapshot.Votes); err != nil {
 		return err
 	}
@@ -203,6 +236,21 @@ func (s *Store) ImportStateSnapshot(ctx context.Context, snapshot protocol.State
 		return err
 	}
 	if err := importResultsTx(ctx, tx, snapshot.Results); err != nil {
+		return err
+	}
+	if err := importDisputesTx(ctx, tx, snapshot.Disputes); err != nil {
+		return err
+	}
+	if err := importOracleReportsTx(ctx, tx, snapshot.OracleReports); err != nil {
+		return err
+	}
+	if err := importGovernanceParametersTx(ctx, tx, snapshot.GovernanceParameters); err != nil {
+		return err
+	}
+	if err := importGovernanceProposalsTx(ctx, tx, snapshot.GovernanceProposals); err != nil {
+		return err
+	}
+	if err := importGovernanceVotesTx(ctx, tx, snapshot.GovernanceVotes); err != nil {
 		return err
 	}
 
@@ -266,12 +314,18 @@ func clearExecutionStateTx(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(
 		ctx,
 		`TRUNCATE TABLE
+		     governance_votes,
+		     governance_proposals,
+		     governance_parameters,
+		     oracle_reports,
 		     proof_artifacts,
 		     task_votes,
+		     task_rebuttals,
 		     task_evaluations,
 		     task_proposals,
 		     task_roles,
 		     task_debate_state,
+		     task_disputes,
 		     task_results,
 		     submissions,
 		     tasks,
@@ -291,10 +345,11 @@ func importValidatorsTx(ctx context.Context, tx *sql.Tx, validators []protocol.V
 		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO validator_registry (address, public_key, power, active, created_at, updated_at)
-			 VALUES ($1, $2, $3, TRUE, NOW(), NOW())`,
+			 VALUES ($1, $2, $3, $4, NOW(), NOW())`,
 			validator.Address,
 			validator.PublicKey,
 			validator.Power,
+			validator.Active,
 		); err != nil {
 			return fmt.Errorf("import validator registry: %w", err)
 		}
@@ -326,8 +381,8 @@ func importTasksTx(ctx context.Context, tx *sql.Tx, tasks []protocol.Task) error
 	for _, task := range tasks {
 		if _, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())`,
+			`INSERT INTO tasks (id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
 			task.ID,
 			task.Creator,
 			task.Type,
@@ -337,6 +392,9 @@ func importTasksTx(ctx context.Context, tx *sql.Tx, tasks []protocol.Task) error
 			task.Input.WorkerCount,
 			task.Input.MinerCount,
 			task.Input.RoleSelectionPolicy,
+			task.Input.OracleSource,
+			task.Input.OracleEndpoint,
+			task.Input.OraclePath,
 			task.RewardPool,
 			task.MinStake,
 			task.Status,
@@ -442,6 +500,26 @@ func importEvaluationsTx(ctx context.Context, tx *sql.Tx, evaluations []protocol
 			evaluation.CreatedAt,
 		); err != nil {
 			return fmt.Errorf("import evaluation %d: %w", evaluation.ID, err)
+		}
+	}
+	return nil
+}
+
+func importRebuttalsTx(ctx context.Context, tx *sql.Tx, rebuttals []protocol.Rebuttal) error {
+	for _, rebuttal := range rebuttals {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO task_rebuttals (id, task_id, proposal_id, agent, round, content, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			rebuttal.ID,
+			rebuttal.TaskID,
+			rebuttal.ProposalID,
+			rebuttal.Agent,
+			rebuttal.Round,
+			rebuttal.Content,
+			rebuttal.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("import rebuttal %d: %w", rebuttal.ID, err)
 		}
 	}
 	return nil
@@ -603,7 +681,7 @@ func listAllAgentsTx(ctx context.Context, tx *sql.Tx) ([]protocol.Agent, error) 
 func listAllTasksTx(ctx context.Context, tx *sql.Tx) ([]protocol.Task, error) {
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 ORDER BY id ASC`,
 	)
@@ -752,6 +830,32 @@ func listAllEvaluationsTx(ctx context.Context, tx *sql.Tx) ([]protocol.ProposalE
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate snapshot evaluations: %w", err)
+	}
+	return items, nil
+}
+
+func listAllRebuttalsTx(ctx context.Context, tx *sql.Tx) ([]protocol.Rebuttal, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id, task_id, proposal_id, agent, round, content, created_at
+		 FROM task_rebuttals
+		 ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query snapshot rebuttals: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]protocol.Rebuttal, 0)
+	for rows.Next() {
+		var item protocol.Rebuttal
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.ProposalID, &item.Agent, &item.Round, &item.Content, &item.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan snapshot rebuttal: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate snapshot rebuttals: %w", err)
 	}
 	return items, nil
 }

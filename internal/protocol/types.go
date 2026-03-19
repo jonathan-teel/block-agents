@@ -8,17 +8,26 @@ import (
 const (
 	StatusOpen    = "open"
 	StatusSettled = "settled"
+	StatusDisputed = "disputed"
 
-	TaskTypePrediction  = "prediction"
-	TaskTypeBlockAgents = "blockagents"
+	TaskTypePrediction       = "prediction"
+	TaskTypeOraclePrediction = "oracle_prediction"
+	TaskTypeBlockAgents      = "blockagents"
 
 	RoleWorker = "worker"
 	RoleMiner  = "miner"
 
 	DebateStageProposal   = "proposal"
 	DebateStageEvaluation = "evaluation"
+	DebateStageRebuttal   = "rebuttal"
 	DebateStageVote       = "vote"
 	DebateStageComplete   = "complete"
+
+	GovernanceProposalOpen             = "open"
+	GovernanceProposalExecuted         = "executed"
+	GovernanceProposalRejected         = "rejected"
+	GovernanceProposalTreasuryTransfer = "treasury_transfer"
+	GovernanceProposalParameterChange  = "parameter_change"
 
 	ConsensusEvidenceDoubleProposal = "double_proposal"
 	ConsensusEvidenceDoubleVote     = "double_vote"
@@ -39,11 +48,18 @@ const (
 	TxTypeSubmitInference   TxType = "submit_inference"
 	TxTypeSubmitProposal    TxType = "submit_proposal"
 	TxTypeSubmitEvaluation  TxType = "submit_evaluation"
+	TxTypeSubmitRebuttal    TxType = "submit_rebuttal"
 	TxTypeSubmitVote        TxType = "submit_vote"
 	TxTypeSubmitProof       TxType = "submit_proof"
 	TxTypeFundAgent         TxType = "fund_agent"
 	TxTypeBootstrapAgentKey TxType = "bootstrap_agent_key"
 	TxTypeRotateAgentKey    TxType = "rotate_agent_key"
+	TxTypeUpsertValidator   TxType = "upsert_validator"
+	TxTypeDeactivateValidator TxType = "deactivate_validator"
+	TxTypeOpenDispute       TxType = "open_dispute"
+	TxTypeResolveDispute    TxType = "resolve_dispute"
+	TxTypeSubmitGovernanceProposal TxType = "submit_governance_proposal"
+	TxTypeSubmitGovernanceVote     TxType = "submit_governance_vote"
 )
 
 type Genesis struct {
@@ -80,6 +96,9 @@ type TaskInput struct {
 	WorkerCount  int    `json:"worker_count,omitempty"`
 	MinerCount   int    `json:"miner_count,omitempty"`
 	RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
+	OracleSource string `json:"oracle_source,omitempty"`
+	OracleEndpoint string `json:"oracle_endpoint,omitempty"`
+	OraclePath string `json:"oracle_path,omitempty"`
 }
 
 type Task struct {
@@ -146,6 +165,16 @@ type ProposalVote struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+type Rebuttal struct {
+	ID         int64     `json:"id"`
+	TaskID     string    `json:"task_id"`
+	ProposalID int64     `json:"proposal_id"`
+	Agent      string    `json:"agent"`
+	Round      int       `json:"round"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type DebateState struct {
 	TaskID           string    `json:"task_id"`
 	CurrentRound     int       `json:"current_round"`
@@ -176,6 +205,7 @@ type Validator struct {
 	Address   string `json:"address"`
 	PublicKey string `json:"public_key"`
 	Power     int64  `json:"power"`
+	Active    bool   `json:"active,omitempty"`
 }
 
 type ConsensusProposal struct {
@@ -260,6 +290,7 @@ type PeerStatus struct {
 	HeadHeight       int64     `json:"head_height"`
 	HeadHash         string    `json:"head_hash"`
 	ObservedAt       time.Time `json:"observed_at"`
+	Signature        string    `json:"signature,omitempty"`
 }
 
 type PeerHello struct {
@@ -268,6 +299,18 @@ type PeerHello struct {
 	ListenAddr       string    `json:"listen_addr"`
 	ValidatorAddress string    `json:"validator_address,omitempty"`
 	SeenAt           time.Time `json:"seen_at"`
+	Signature        string    `json:"signature,omitempty"`
+}
+
+type PeerTelemetry struct {
+	Peer                PeerStatus  `json:"peer"`
+	Score               int         `json:"score"`
+	ConsecutiveFailures int         `json:"consecutive_failures"`
+	LastAttemptAt       *time.Time  `json:"last_attempt_at,omitempty"`
+	LastSuccessAt       *time.Time  `json:"last_success_at,omitempty"`
+	LastFailureAt       *time.Time  `json:"last_failure_at,omitempty"`
+	BackoffUntil        *time.Time  `json:"backoff_until,omitempty"`
+	LastError           string      `json:"last_error,omitempty"`
 }
 
 type Agent struct {
@@ -291,6 +334,64 @@ type Result struct {
 	LastUpdatedAt     time.Time  `json:"last_updated_at"`
 }
 
+type TaskDispute struct {
+	ID         int64      `json:"id"`
+	TaskID      string     `json:"task_id"`
+	Challenger  string     `json:"challenger"`
+	Bond        float64    `json:"bond"`
+	Reason      string     `json:"reason"`
+	Status      string     `json:"status"`
+	Resolver    string     `json:"resolver,omitempty"`
+	Resolution  string     `json:"resolution,omitempty"`
+	Notes       string     `json:"notes,omitempty"`
+	OpenedAt    time.Time  `json:"opened_at"`
+	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+}
+
+type OracleReport struct {
+	ID         int64     `json:"id"`
+	TaskID     string    `json:"task_id"`
+	Source     string    `json:"source"`
+	Endpoint   string    `json:"endpoint"`
+	Path       string    `json:"path"`
+	Value      float64   `json:"value"`
+	ObservedAt time.Time `json:"observed_at"`
+	RawHash    string    `json:"raw_hash"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type GovernanceParameter struct {
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type GovernanceProposal struct {
+	ID             int64      `json:"id"`
+	Proposer       string     `json:"proposer"`
+	ProposalType   string     `json:"proposal_type"`
+	Title          string     `json:"title"`
+	Description    string     `json:"description"`
+	TargetAddress  string     `json:"target_address,omitempty"`
+	Amount         float64    `json:"amount,omitempty"`
+	ParameterName  string     `json:"parameter_name,omitempty"`
+	ParameterValue string     `json:"parameter_value,omitempty"`
+	VotingDeadline int64      `json:"voting_deadline"`
+	Status         string     `json:"status"`
+	ExecutionNote  string     `json:"execution_note,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+}
+
+type GovernanceVote struct {
+	ID         int64     `json:"id"`
+	ProposalID int64     `json:"proposal_id"`
+	Voter      string    `json:"voter"`
+	Vote       string    `json:"vote"`
+	Power      int64     `json:"power"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type TaskDetails struct {
 	Task             Task                 `json:"task"`
 	Assignments      []RoleAssignment     `json:"assignments,omitempty"`
@@ -298,8 +399,11 @@ type TaskDetails struct {
 	Submissions      []Submission         `json:"submissions,omitempty"`
 	Proposals        []Proposal           `json:"proposals,omitempty"`
 	Evaluations      []ProposalEvaluation `json:"evaluations,omitempty"`
+	Rebuttals        []Rebuttal           `json:"rebuttals,omitempty"`
 	Votes            []ProposalVote       `json:"votes,omitempty"`
 	Proofs           []ProofOfThought     `json:"proofs,omitempty"`
+	Disputes         []TaskDispute        `json:"disputes,omitempty"`
+	OracleReports    []OracleReport       `json:"oracle_reports,omitempty"`
 	CurrentConsensus *float64             `json:"current_consensus,omitempty"`
 	FinalResult      *Result              `json:"final_result,omitempty"`
 }
@@ -315,6 +419,9 @@ type CreateTaskRequest struct {
 	WorkerCount  int     `json:"worker_count,omitempty"`
 	MinerCount   int     `json:"miner_count,omitempty"`
 	RoleSelectionPolicy string `json:"role_selection_policy,omitempty"`
+	OracleSource string `json:"oracle_source,omitempty"`
+	OracleEndpoint string `json:"oracle_endpoint,omitempty"`
+	OraclePath string `json:"oracle_path,omitempty"`
 	Auth         TxAuth  `json:"auth"`
 }
 
@@ -344,6 +451,15 @@ type SubmitEvaluationRequest struct {
 	CausalRelevance    float64 `json:"causal_relevance"`
 	Comments           string  `json:"comments,omitempty"`
 	Auth               TxAuth  `json:"auth"`
+}
+
+type SubmitRebuttalRequest struct {
+	TaskID     string `json:"task_id"`
+	ProposalID int64  `json:"proposal_id"`
+	Agent      string `json:"agent"`
+	Round      int    `json:"round"`
+	Content    string `json:"content"`
+	Auth       TxAuth `json:"auth"`
 }
 
 type SubmitVoteRequest struct {
@@ -383,6 +499,55 @@ type RotateAgentKeyRequest struct {
 	NewPublicKey string `json:"new_public_key"`
 	NewSignature string `json:"new_signature"`
 	Auth         TxAuth `json:"auth"`
+}
+
+type UpsertValidatorRequest struct {
+	Operator  string `json:"operator"`
+	Validator string `json:"validator"`
+	PublicKey string `json:"public_key"`
+	Power     int64  `json:"power"`
+	Auth      TxAuth `json:"auth"`
+}
+
+type DeactivateValidatorRequest struct {
+	Operator  string `json:"operator"`
+	Validator string `json:"validator"`
+	Auth      TxAuth `json:"auth"`
+}
+
+type OpenDisputeRequest struct {
+	TaskID      string `json:"task_id"`
+	Challenger  string `json:"challenger"`
+	Reason      string `json:"reason"`
+	Auth        TxAuth `json:"auth"`
+}
+
+type ResolveDisputeRequest struct {
+	DisputeID   int64  `json:"dispute_id"`
+	Resolver    string `json:"resolver"`
+	Resolution  string `json:"resolution"`
+	Notes       string `json:"notes,omitempty"`
+	Auth        TxAuth `json:"auth"`
+}
+
+type SubmitGovernanceProposalRequest struct {
+	Proposer       string  `json:"proposer"`
+	ProposalType   string  `json:"proposal_type"`
+	Title          string  `json:"title"`
+	Description    string  `json:"description"`
+	TargetAddress  string  `json:"target_address,omitempty"`
+	Amount         float64 `json:"amount,omitempty"`
+	ParameterName  string  `json:"parameter_name,omitempty"`
+	ParameterValue string  `json:"parameter_value,omitempty"`
+	VotingDeadline int64   `json:"voting_deadline"`
+	Auth           TxAuth  `json:"auth"`
+}
+
+type SubmitGovernanceVoteRequest struct {
+	ProposalID int64  `json:"proposal_id"`
+	Voter      string `json:"voter"`
+	Vote       string `json:"vote"`
+	Auth       TxAuth `json:"auth"`
 }
 
 type Transaction struct {
@@ -475,10 +640,28 @@ type StateSnapshot struct {
 	Submissions         []Submission            `json:"submissions,omitempty"`
 	Proposals           []Proposal              `json:"proposals,omitempty"`
 	Evaluations         []ProposalEvaluation    `json:"evaluations,omitempty"`
+	Rebuttals           []Rebuttal              `json:"rebuttals,omitempty"`
 	Votes               []ProposalVote          `json:"votes,omitempty"`
 	Proofs              []ProofOfThought        `json:"proofs,omitempty"`
 	Results             []Result                `json:"results,omitempty"`
+	Disputes            []TaskDispute           `json:"disputes,omitempty"`
+	OracleReports       []OracleReport          `json:"oracle_reports,omitempty"`
+	GovernanceParameters []GovernanceParameter  `json:"governance_parameters,omitempty"`
+	GovernanceProposals []GovernanceProposal    `json:"governance_proposals,omitempty"`
+	GovernanceVotes     []GovernanceVote        `json:"governance_votes,omitempty"`
 	ConsensusEvidence   []ConsensusEvidence     `json:"consensus_evidence,omitempty"`
 	ConsensusRounds     []ConsensusRoundChange  `json:"consensus_round_changes,omitempty"`
 	ExportedAt          time.Time               `json:"exported_at"`
+}
+
+type SyncStatus struct {
+	LastAttemptAt     *time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
+	LastFailureAt     *time.Time `json:"last_failure_at,omitempty"`
+	LastMode          string     `json:"last_mode,omitempty"`
+	LastPeer          string     `json:"last_peer,omitempty"`
+	LastForkHeight    int64      `json:"last_fork_height,omitempty"`
+	LastTargetHeight  int64      `json:"last_target_height,omitempty"`
+	LastImportedHeight int64     `json:"last_imported_height,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
 }

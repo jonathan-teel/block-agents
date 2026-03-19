@@ -82,16 +82,21 @@ func (s *Store) replayAndValidateBlockTx(ctx context.Context, tx *sql.Tx, meta c
 	if err != nil {
 		return err
 	}
+	governanceEvents, err := finalizeGovernanceProposalsTx(ctx, tx, s.cfg, nowUnix)
+	if err != nil {
+		return err
+	}
 	settlementEvents, err := s.settleExpiredTasksTx(ctx, tx, nowUnix)
 	if err != nil {
 		return err
 	}
-	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, nowUnix, s.cfg.ValidatorSlashFraction, s.cfg.ValidatorSlashReputationPenalty)
+	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, s.cfg, nowUnix, s.cfg.ValidatorSlashFraction, s.cfg.ValidatorSlashReputationPenalty)
 	if err != nil {
 		return err
 	}
 
 	computedEvents := append(consensusEvents, debateEvents...)
+	computedEvents = append(computedEvents, governanceEvents...)
 	computedEvents = append(computedEvents, settlementEvents...)
 	computedEvents = append(computedEvents, slashingEvents...)
 

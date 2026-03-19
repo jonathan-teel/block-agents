@@ -40,6 +40,11 @@ func (s *Service) discoverOnce(ctx context.Context) {
 			if candidate.NodeID == "" || candidate.ListenAddr == "" || candidate.ChainID != s.cfg.ChainID || candidate.NodeID == s.cfg.NodeID {
 				continue
 			}
+			if s.engine != nil {
+				if err := s.engine.VerifyPeerStatus(candidate); err != nil {
+					continue
+				}
+			}
 			candidate.ObservedAt = candidate.ObservedAt.UTC()
 			if candidate.ObservedAt.IsZero() {
 				candidate.ObservedAt = time.Now().UTC()
@@ -54,6 +59,11 @@ func (s *Service) discoverOnce(ctx context.Context) {
 		}
 		if status.NodeID == "" || status.NodeID == s.cfg.NodeID || status.ChainID != s.cfg.ChainID {
 			continue
+		}
+		if s.engine != nil {
+			if err := s.engine.VerifyPeerStatus(status); err != nil {
+				continue
+			}
 		}
 		if status.ObservedAt.IsZero() {
 			status.ObservedAt = time.Now().UTC()

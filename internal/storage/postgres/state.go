@@ -38,7 +38,7 @@ func (s *Store) GetAgent(ctx context.Context, address string) (protocol.Agent, e
 func (s *Store) ListOpenTasks(ctx context.Context) ([]protocol.Task, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE status = $1
 		 ORDER BY deadline ASC, created_at ASC`,
@@ -107,6 +107,12 @@ func (s *Store) GetTaskDetails(ctx context.Context, taskID string) (protocol.Tas
 	}
 	details.Evaluations = evaluations
 
+	rebuttals, err := s.listRebuttalsByTask(ctx, s.db, taskID)
+	if err != nil {
+		return protocol.TaskDetails{}, err
+	}
+	details.Rebuttals = rebuttals
+
 	votes, err := s.listVotesByTask(ctx, s.db, taskID)
 	if err != nil {
 		return protocol.TaskDetails{}, err
@@ -118,6 +124,18 @@ func (s *Store) GetTaskDetails(ctx context.Context, taskID string) (protocol.Tas
 		return protocol.TaskDetails{}, err
 	}
 	details.Proofs = proofs
+
+	disputes, err := s.listDisputesByTask(ctx, s.db, taskID)
+	if err != nil {
+		return protocol.TaskDetails{}, err
+	}
+	details.Disputes = disputes
+
+	oracleReports, err := s.listOracleReportsByTask(ctx, s.db, taskID)
+	if err != nil {
+		return protocol.TaskDetails{}, err
+	}
+	details.OracleReports = oracleReports
 
 	var (
 		finalValue sql.NullFloat64
@@ -185,7 +203,7 @@ func (s *Store) getTask(ctx context.Context, querier interface {
 }, taskID string) (protocol.Task, error) {
 	task, err := scanTask(querier.QueryRowContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE id = $1`,
 		taskID,
@@ -336,6 +354,37 @@ func (s *Store) listEvaluationsByTask(ctx context.Context, querier interface {
 	return evaluations, nil
 }
 
+func (s *Store) listRebuttalsByTask(ctx context.Context, querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, taskID string) ([]protocol.Rebuttal, error) {
+	rows, err := querier.QueryContext(
+		ctx,
+		`SELECT id, task_id, proposal_id, agent, round, content, created_at
+		 FROM task_rebuttals
+		 WHERE task_id = $1
+		 ORDER BY round ASC, id ASC`,
+		taskID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query rebuttals: %w", err)
+	}
+	defer rows.Close()
+
+	rebuttals := make([]protocol.Rebuttal, 0)
+	for rows.Next() {
+		var rebuttal protocol.Rebuttal
+		if err := rows.Scan(&rebuttal.ID, &rebuttal.TaskID, &rebuttal.ProposalID, &rebuttal.Agent, &rebuttal.Round, &rebuttal.Content, &rebuttal.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan rebuttal: %w", err)
+		}
+		rebuttals = append(rebuttals, rebuttal)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rebuttals: %w", err)
+	}
+
+	return rebuttals, nil
+}
+
 func (s *Store) listVotesByTask(ctx context.Context, querier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, taskID string) ([]protocol.ProposalVote, error) {
@@ -455,6 +504,9 @@ func scanTask(scanner rowScanner) (protocol.Task, error) {
 		&task.Input.WorkerCount,
 		&task.Input.MinerCount,
 		&task.Input.RoleSelectionPolicy,
+		&task.Input.OracleSource,
+		&task.Input.OracleEndpoint,
+		&task.Input.OraclePath,
 		&task.RewardPool,
 		&task.MinStake,
 		&task.Status,
@@ -470,7 +522,7 @@ func scanTask(scanner rowScanner) (protocol.Task, error) {
 func getTaskForUpdate(ctx context.Context, tx *sql.Tx, taskID string) (protocol.Task, error) {
 	task, err := scanTask(tx.QueryRowContext(
 		ctx,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status, created_at
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status, created_at
 		 FROM tasks
 		 WHERE id = $1
 		 FOR UPDATE`,
@@ -572,7 +624,33 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	}
 
 	if err := appendStateRows(ctx, tx, &parts,
-		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, reward_pool, min_stake, status
+		`SELECT address, public_key, power, active
+		 FROM validator_registry
+		 ORDER BY address ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				address   string
+				publicKey string
+				power     int64
+				active    bool
+			)
+			if err := rows.Scan(&address, &publicKey, &power, &active); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"validator",
+				address,
+				publicKey,
+				strconv.FormatInt(power, 10),
+				strconv.FormatBool(active),
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, creator, type, question, deadline, debate_rounds, worker_count, miner_count, role_selection_policy, oracle_source, oracle_endpoint, oracle_path, reward_pool, min_stake, status
 		 FROM tasks
 		 ORDER BY id ASC`,
 		func(rows *sql.Rows) (string, error) {
@@ -586,11 +664,14 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				workerCount int
 				minerCount int
 				roleSelectionPolicy string
+				oracleSource string
+				oracleEndpoint string
+				oraclePath string
 				rewardPool float64
 				minStake   float64
 				status     string
 			)
-			if err := rows.Scan(&id, &creator, &taskType, &question, &deadline, &debateRounds, &workerCount, &minerCount, &roleSelectionPolicy, &rewardPool, &minStake, &status); err != nil {
+			if err := rows.Scan(&id, &creator, &taskType, &question, &deadline, &debateRounds, &workerCount, &minerCount, &roleSelectionPolicy, &oracleSource, &oracleEndpoint, &oraclePath, &rewardPool, &minStake, &status); err != nil {
 				return "", err
 			}
 			return strings.Join([]string{
@@ -604,6 +685,9 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				strconv.Itoa(workerCount),
 				strconv.Itoa(minerCount),
 				roleSelectionPolicy,
+				oracleSource,
+				oracleEndpoint,
+				oraclePath,
 				formatFloat(rewardPool),
 				formatFloat(minStake),
 				status,
@@ -760,6 +844,36 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	}
 
 	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, task_id, proposal_id, agent, round, content
+		 FROM task_rebuttals
+		 ORDER BY id ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				id         int64
+				taskID     string
+				proposalID int64
+				agent      string
+				round      int
+				content    string
+			)
+			if err := rows.Scan(&id, &taskID, &proposalID, &agent, &round, &content); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"rebuttal",
+				strconv.FormatInt(id, 10),
+				taskID,
+				strconv.FormatInt(proposalID, 10),
+				agent,
+				strconv.Itoa(round),
+				content,
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
 		`SELECT id, task_id, proposal_id, voter, round
 		 FROM task_votes
 		 ORDER BY id ASC`,
@@ -851,6 +965,172 @@ func computeStateRootTx(ctx context.Context, tx *sql.Tx) (string, error) {
 				strconv.FormatInt(winningProposalID, 10),
 				winningAgent,
 				strconv.FormatBool(settled),
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, task_id, source, endpoint, path, value, observed_at, raw_hash
+		 FROM oracle_reports
+		 ORDER BY observed_at ASC, id ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				id int64
+				taskID string
+				source string
+				endpoint string
+				path string
+				value float64
+				observedAt time.Time
+				rawHash string
+			)
+			if err := rows.Scan(&id, &taskID, &source, &endpoint, &path, &value, &observedAt, &rawHash); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"oracle_report",
+				strconv.FormatInt(id, 10),
+				taskID,
+				source,
+				endpoint,
+				path,
+				formatFloat(value),
+				observedAt.UTC().Format(time.RFC3339Nano),
+				rawHash,
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, task_id, challenger, bond, reason, status, COALESCE(resolver, ''), COALESCE(resolution, ''), COALESCE(notes, ''), opened_at, COALESCE(resolved_at, TO_TIMESTAMP(0))
+		 FROM task_disputes
+		 ORDER BY id ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				id         int64
+				taskID     string
+				challenger string
+				bond       float64
+				reason     string
+				status     string
+				resolver   string
+				resolution string
+				notes      string
+				openedAt   time.Time
+				resolvedAt time.Time
+			)
+			if err := rows.Scan(&id, &taskID, &challenger, &bond, &reason, &status, &resolver, &resolution, &notes, &openedAt, &resolvedAt); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"dispute",
+				strconv.FormatInt(id, 10),
+				taskID,
+				challenger,
+				formatFloat(bond),
+				reason,
+				status,
+				resolver,
+				resolution,
+				notes,
+				openedAt.UTC().Format(time.RFC3339Nano),
+				resolvedAt.UTC().Format(time.RFC3339Nano),
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT name, value
+		 FROM governance_parameters
+		 ORDER BY name ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				name  string
+				value string
+			)
+			if err := rows.Scan(&name, &value); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{"governance_parameter", name, value}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, proposer, proposal_type, title, description, target_address, amount, parameter_name, parameter_value, voting_deadline, status, execution_note, created_at, COALESCE(resolved_at, TO_TIMESTAMP(0))
+		 FROM governance_proposals
+		 ORDER BY id ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				id             int64
+				proposer       string
+				proposalType   string
+				title          string
+				description    string
+				targetAddress  string
+				amount         float64
+				parameterName  string
+				parameterValue string
+				votingDeadline int64
+				status         string
+				executionNote  string
+				createdAt      time.Time
+				resolvedAt     time.Time
+			)
+			if err := rows.Scan(&id, &proposer, &proposalType, &title, &description, &targetAddress, &amount, &parameterName, &parameterValue, &votingDeadline, &status, &executionNote, &createdAt, &resolvedAt); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"governance_proposal",
+				strconv.FormatInt(id, 10),
+				proposer,
+				proposalType,
+				title,
+				description,
+				targetAddress,
+				formatFloat(amount),
+				parameterName,
+				parameterValue,
+				strconv.FormatInt(votingDeadline, 10),
+				status,
+				executionNote,
+				createdAt.UTC().Format(time.RFC3339Nano),
+				resolvedAt.UTC().Format(time.RFC3339Nano),
+			}, "|"), nil
+		},
+	); err != nil {
+		return "", err
+	}
+
+	if err := appendStateRows(ctx, tx, &parts,
+		`SELECT id, proposal_id, voter, vote, power
+		 FROM governance_votes
+		 ORDER BY id ASC`,
+		func(rows *sql.Rows) (string, error) {
+			var (
+				id         int64
+				proposalID int64
+				voter      string
+				vote       string
+				power      int64
+			)
+			if err := rows.Scan(&id, &proposalID, &voter, &vote, &power); err != nil {
+				return "", err
+			}
+			return strings.Join([]string{
+				"governance_vote",
+				strconv.FormatInt(id, 10),
+				strconv.FormatInt(proposalID, 10),
+				voter,
+				vote,
+				strconv.FormatInt(power, 10),
 			}, "|"), nil
 		},
 	); err != nil {

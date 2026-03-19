@@ -91,6 +91,25 @@ func referencedObjectDigestTx(ctx context.Context, tx *sql.Tx, taskID string, re
 		}
 		payload, _ := json.Marshal(vote)
 		return protocol.HashBytes(payload), nil
+	case "rebuttal":
+		var (
+			agent   string
+			content string
+		)
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT agent, content
+			 FROM task_rebuttals
+			 WHERE id = $1 AND task_id = $2`,
+			referenceID,
+			taskID,
+		).Scan(&agent, &content); err != nil {
+			if err == sql.ErrNoRows {
+				return "", nil
+			}
+			return "", fmt.Errorf("query referenced rebuttal: %w", err)
+		}
+		return protocol.HashStrings([]string{agent, content}), nil
 	case "proof":
 		var semanticRoot string
 		if err := tx.QueryRowContext(

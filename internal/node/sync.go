@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"time"
@@ -46,6 +47,11 @@ func (s *Service) syncOnce(ctx context.Context) {
 		if status.ChainID != s.cfg.ChainID || status.NodeID == s.cfg.NodeID {
 			continue
 		}
+		if s.engine != nil {
+			if err := s.engine.VerifyPeerStatus(status); err != nil {
+				continue
+			}
+		}
 		s.peers.RememberPeer(status)
 		_ = s.store.UpsertPeer(ctx, status)
 		peerStatuses = append(peerStatuses, struct {
@@ -54,32 +60,35 @@ func (s *Service) syncOnce(ctx context.Context) {
 		}{peer: peer.ListenAddr, status: status})
 	}
 
-	for {
-		plan, ok := s.selectSyncPlan(ctx, info, peerStatuses)
-		if !ok {
-			if !s.tryStateSync(ctx, info, peerStatuses) {
-				return
-			}
-			info, err = s.store.GetChainInfo(ctx)
-			if err != nil {
-				return
-			}
-			continue
-		}
+	plan, ok := s.selectSyncPlan(ctx, info, peerStatuses)
+	if !ok {
+		s.tryStateSync(ctx, info, peerStatuses)
+		return
+	}
 
-		if err := s.store.ImportCertifiedBranch(ctx, plan.Bundles); err != nil {
-			log.Printf("sync import certified branch fork_height=%d from=%s error=%v", plan.ForkHeight, plan.Source.NodeID, err)
-			return
+	if s.syncTracker != nil {
+		targetHeight := plan.Bundles[len(plan.Bundles)-1].Block.Header.Height
+		s.syncTracker.RecordAttempt("certified_branch", plan.Source.NodeID, plan.ForkHeight, targetHeight)
+	}
+	if err := s.store.ImportCertifiedBranch(ctx, plan.Bundles); err != nil {
+		log.Printf("sync import certified branch fork_height=%d from=%s error=%v", plan.ForkHeight, plan.Source.NodeID, err)
+		if s.syncTracker != nil {
+			targetHeight := plan.Bundles[len(plan.Bundles)-1].Block.Header.Height
+			s.syncTracker.RecordFailure("certified_branch", plan.Source.NodeID, plan.ForkHeight, targetHeight, err)
 		}
-		info, err = s.store.GetChainInfo(ctx)
-		if err != nil {
-			return
-		}
+		return
+	}
+	if err := s.engine.ReloadValidatorSet(ctx); err != nil {
+		log.Printf("reload validator set after branch import error: %v", err)
+	}
+	if s.syncTracker != nil {
+		importedHeight := plan.Bundles[len(plan.Bundles)-1].Block.Header.Height
+		s.syncTracker.RecordSuccess("certified_branch", plan.Source.NodeID, plan.ForkHeight, importedHeight, importedHeight)
 	}
 }
 
 type certifiedBranch struct {
-	Source protocol.PeerStatus
+	Source  protocol.PeerStatus
 	Bundles []protocol.CertifiedBlock
 }
 
@@ -95,47 +104,10 @@ func (s *Service) selectSyncPlan(ctx context.Context, info protocol.ChainInfo, p
 }) (syncPlan, bool) {
 	plans := make([]syncPlan, 0)
 
-	nextHeight := info.HeadHeight + 1
-	forwardBranches := s.collectCertifiedBranches(ctx, peerStatuses, nextHeight, info.HeadHash)
-	if len(forwardBranches) > 0 {
-		plans = append(plans, syncPlan{
-			ForkHeight: nextHeight,
-			Source:     forwardBranches[0].Source,
-			Bundles:    forwardBranches[0].Bundles,
-		})
-	}
-
-	if s.cfg.ReorgPolicy == "best_certified" {
-		start := syncStartHeight(info.HeadHeight, s.cfg.SyncLookaheadBlocks)
-		for forkHeight := start; forkHeight <= info.HeadHeight; forkHeight++ {
-			parentHash, err := s.parentHashForFork(ctx, info, forkHeight)
-			if err != nil {
-				continue
-			}
-
-			remoteBranches := s.collectCertifiedBranches(ctx, peerStatuses, forkHeight, parentHash)
-			if len(remoteBranches) == 0 {
-				continue
-			}
-
-			localBundles, err := s.store.ListCertifiedBlocksRange(ctx, forkHeight, s.cfg.SyncLookaheadBlocks)
-			if err != nil || len(localBundles) == 0 {
-				continue
-			}
-			if !betterBranch(remoteBranches[0], certifiedBranch{Source: protocol.PeerStatus{NodeID: s.cfg.NodeID}, Bundles: localBundles}) {
-				continue
-			}
-
-			trimmed := trimCommonCertifiedPrefix(localBundles, remoteBranches[0].Bundles)
-			if len(trimmed) == 0 {
-				continue
-			}
-
-			plans = append(plans, syncPlan{
-				ForkHeight: trimmed[0].Block.Header.Height,
-				Source:     remoteBranches[0].Source,
-				Bundles:    trimmed,
-			})
+	for _, peer := range peerStatuses {
+		plan, ok := s.buildSyncPlanForPeer(ctx, info, peer.status)
+		if ok {
+			plans = append(plans, plan)
 		}
 	}
 
@@ -146,6 +118,61 @@ func (s *Service) selectSyncPlan(ctx context.Context, info protocol.ChainInfo, p
 		return betterSyncPlan(plans[i], plans[j])
 	})
 	return plans[0], true
+}
+
+func (s *Service) buildSyncPlanForPeer(ctx context.Context, info protocol.ChainInfo, peer protocol.PeerStatus) (syncPlan, bool) {
+	if peer.HeadHeight <= 0 {
+		return syncPlan{}, false
+	}
+
+	ancestorHeight, err := s.findCommonAncestor(ctx, info, peer)
+	if err != nil {
+		return syncPlan{}, false
+	}
+	if ancestorHeight >= peer.HeadHeight {
+		return syncPlan{}, false
+	}
+
+	bundles, err := s.fetchCertifiedBranchFrom(ctx, peer.ListenAddr, ancestorHeight+1, peer.HeadHeight)
+	if err != nil || len(bundles) == 0 {
+		return syncPlan{}, false
+	}
+	if err := s.engine.VerifyCertifiedBranch(bundles); err != nil {
+		log.Printf("sync verify certified branch from=%s fork=%d error=%v", peer.NodeID, ancestorHeight+1, err)
+		return syncPlan{}, false
+	}
+
+	if ancestorHeight == info.HeadHeight {
+		return syncPlan{
+			ForkHeight: ancestorHeight + 1,
+			Source:     peer,
+			Bundles:    bundles,
+		}, true
+	}
+	if s.cfg.ReorgPolicy != "best_certified" {
+		return syncPlan{}, false
+	}
+
+	localBundles, err := s.store.ListCertifiedBlocksRange(ctx, ancestorHeight+1, int(info.HeadHeight-ancestorHeight))
+	if err != nil {
+		return syncPlan{}, false
+	}
+	if !betterBranch(certifiedBranch{Source: peer, Bundles: bundles}, certifiedBranch{
+		Source:  protocol.PeerStatus{NodeID: s.cfg.NodeID},
+		Bundles: localBundles,
+	}) {
+		return syncPlan{}, false
+	}
+
+	trimmed := trimCommonCertifiedPrefix(localBundles, bundles)
+	if len(trimmed) == 0 {
+		return syncPlan{}, false
+	}
+	return syncPlan{
+		ForkHeight: trimmed[0].Block.Header.Height,
+		Source:     peer,
+		Bundles:    trimmed,
+	}, true
 }
 
 func (s *Service) tryStateSync(ctx context.Context, info protocol.ChainInfo, peerStatuses []struct {
@@ -166,89 +193,96 @@ func (s *Service) tryStateSync(ctx context.Context, info protocol.ChainInfo, pee
 		return false
 	}
 
+	if s.syncTracker != nil {
+		s.syncTracker.RecordAttempt("state_snapshot", best.NodeID, 0, best.HeadHeight)
+	}
 	snapshot, err := s.peers.FetchStateSnapshot(ctx, best.ListenAddr, s.cfg.SyncLookaheadBlocks)
 	if err != nil {
+		if s.syncTracker != nil {
+			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
+		}
 		return false
 	}
 	if snapshot.ChainInfo.ChainID != s.cfg.ChainID {
+		err := fmt.Errorf("snapshot chain_id %s does not match local chain", snapshot.ChainInfo.ChainID)
+		if s.syncTracker != nil {
+			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
+		}
 		return false
 	}
-	for _, bundle := range snapshot.CertifiedWindow {
-		if err := s.engine.VerifyCertifiedBlock(bundle); err != nil {
-			return false
+	if err := s.engine.VerifyCertifiedBranch(snapshot.CertifiedWindow); err != nil {
+		if s.syncTracker != nil {
+			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
 		}
+		return false
 	}
 	if err := s.store.ImportStateSnapshot(ctx, snapshot); err != nil {
 		log.Printf("sync state snapshot from=%s error=%v", best.NodeID, err)
+		if s.syncTracker != nil {
+			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
+		}
 		return false
+	}
+	if err := s.engine.ReloadValidatorSet(ctx); err != nil {
+		log.Printf("reload validator set after snapshot import error: %v", err)
+	}
+	if s.syncTracker != nil {
+		s.syncTracker.RecordSuccess("state_snapshot", best.NodeID, 0, best.HeadHeight, snapshot.HeadBlock.Header.Height)
 	}
 	return true
 }
 
-func (s *Service) collectCertifiedBranches(ctx context.Context, peerStatuses []struct {
-	peer   string
-	status protocol.PeerStatus
-}, nextHeight int64, parentHash string) []certifiedBranch {
-	branches := make([]certifiedBranch, 0, len(peerStatuses))
-	for _, peer := range peerStatuses {
-		if peer.status.HeadHeight < nextHeight {
+func (s *Service) findCommonAncestor(ctx context.Context, info protocol.ChainInfo, peer protocol.PeerStatus) (int64, error) {
+	maxHeight := info.HeadHeight
+	if peer.HeadHeight < maxHeight {
+		maxHeight = peer.HeadHeight
+	}
+
+	for height := maxHeight; height >= 1; height-- {
+		localBlock, err := s.store.GetBlockByHeight(ctx, height)
+		if err != nil {
 			continue
 		}
-
-		bundles, err := s.peers.FetchCertifiedBlocksRange(ctx, peer.status.ListenAddr, nextHeight, s.cfg.SyncLookaheadBlocks)
-		if err != nil || len(bundles) == 0 {
+		remoteBundle, err := s.peers.FetchCertifiedBlock(ctx, peer.ListenAddr, height)
+		if err != nil {
 			continue
 		}
-
-		branch := certifiedBranch{Source: peer.status}
-		for index, bundle := range bundles {
-			if err := s.engine.VerifyCertifiedBlock(bundle); err != nil {
-				log.Printf("sync verify certified block height=%d from=%s error=%v", bundle.Block.Header.Height, peer.status.NodeID, err)
-				break
-			}
-			expectedHeight := nextHeight + int64(index)
-			if bundle.Block.Header.Height != expectedHeight {
-				break
-			}
-			if index == 0 && bundle.Block.Header.ParentHash != parentHash {
-				break
-			}
-			if index > 0 {
-				parent := branch.Bundles[index-1].Block.Hash
-				if bundle.Block.Header.ParentHash != parent {
-					break
-				}
-			}
-			branch.Bundles = append(branch.Bundles, bundle)
-		}
-		if len(branch.Bundles) > 0 {
-			branches = append(branches, branch)
+		if remoteBundle.Block.Hash == localBlock.Hash {
+			return height, nil
 		}
 	}
-
-	sort.Slice(branches, func(i, j int) bool {
-		return betterBranch(branches[i], branches[j])
-	})
-	return branches
+	return 0, nil
 }
 
-func (s *Service) parentHashForFork(ctx context.Context, info protocol.ChainInfo, forkHeight int64) (string, error) {
-	if forkHeight <= 1 {
-		return info.GenesisHash, nil
+func (s *Service) fetchCertifiedBranchFrom(ctx context.Context, listenAddr string, fromHeight int64, toHeight int64) ([]protocol.CertifiedBlock, error) {
+	if toHeight < fromHeight {
+		return nil, nil
 	}
-	block, err := s.store.GetBlockByHeight(ctx, forkHeight-1)
-	if err != nil {
-		return "", err
-	}
-	return block.Hash, nil
-}
 
-func syncStartHeight(headHeight int64, lookahead int) int64 {
-	start := headHeight - int64(lookahead) + 1
-	if start < 1 {
-		return 1
+	pageSize := s.cfg.SyncLookaheadBlocks
+	if pageSize <= 0 || pageSize > 64 {
+		pageSize = 64
 	}
-	return start
+
+	bundles := make([]protocol.CertifiedBlock, 0, toHeight-fromHeight+1)
+	for current := fromHeight; current <= toHeight; {
+		remaining := int(toHeight - current + 1)
+		limit := pageSize
+		if remaining < limit {
+			limit = remaining
+		}
+		page, err := s.peers.FetchCertifiedBlocksRange(ctx, listenAddr, current, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			return nil, fmt.Errorf("peer returned an incomplete certified branch at height %d", current)
+		}
+		bundles = append(bundles, page...)
+		current += int64(len(page))
+	}
+
+	return bundles, nil
 }
 
 func trimCommonCertifiedPrefix(local []protocol.CertifiedBlock, remote []protocol.CertifiedBlock) []protocol.CertifiedBlock {

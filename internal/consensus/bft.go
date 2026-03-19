@@ -137,6 +137,44 @@ func VerifyRoundChange(set ValidatorSet, message protocol.ConsensusRoundChange) 
 	return verifySignature(validator.PublicKey, message.Signature, roundChangeSignBytes(message))
 }
 
+func SignPeerHello(message protocol.PeerHello, privateKey ed25519.PrivateKey) (string, error) {
+	signature := ed25519.Sign(privateKey, peerHelloSignBytes(message))
+	return hex.EncodeToString(signature), nil
+}
+
+func VerifyPeerHello(set ValidatorSet, message protocol.PeerHello) error {
+	validator, ok := set.Get(message.ValidatorAddress)
+	if !ok {
+		return fmt.Errorf("unknown peer validator %s", message.ValidatorAddress)
+	}
+	if strings.TrimSpace(message.NodeID) == "" {
+		return fmt.Errorf("peer hello node_id is required")
+	}
+	if strings.TrimSpace(message.ListenAddr) == "" {
+		return fmt.Errorf("peer hello listen_addr is required")
+	}
+	return verifySignature(validator.PublicKey, message.Signature, peerHelloSignBytes(message))
+}
+
+func SignPeerStatus(status protocol.PeerStatus, privateKey ed25519.PrivateKey) (string, error) {
+	signature := ed25519.Sign(privateKey, peerStatusSignBytes(status))
+	return hex.EncodeToString(signature), nil
+}
+
+func VerifyPeerStatus(set ValidatorSet, status protocol.PeerStatus) error {
+	validator, ok := set.Get(status.ValidatorAddress)
+	if !ok {
+		return fmt.Errorf("unknown peer validator %s", status.ValidatorAddress)
+	}
+	if strings.TrimSpace(status.NodeID) == "" {
+		return fmt.Errorf("peer status node_id is required")
+	}
+	if strings.TrimSpace(status.ListenAddr) == "" {
+		return fmt.Errorf("peer status listen_addr is required")
+	}
+	return verifySignature(validator.PublicKey, status.Signature, peerStatusSignBytes(status))
+}
+
 type VoteTracker struct {
 	mu    sync.Mutex
 	set   ValidatorSet
@@ -291,6 +329,50 @@ func VerifyCertifiedBlock(set ValidatorSet, bundle protocol.CertifiedBlock) erro
 	return nil
 }
 
+func ApplyValidatorUpdates(validators []protocol.Validator, block protocol.Block) ([]protocol.Validator, error) {
+	index := make(map[string]protocol.Validator, len(validators))
+	for _, validator := range validators {
+		index[validator.Address] = validator
+	}
+
+	for position, transaction := range block.Transactions {
+		if position >= len(block.Receipts) || !block.Receipts[position].Success {
+			continue
+		}
+
+		switch transaction.Type {
+		case protocol.TxTypeUpsertValidator:
+			var payload protocol.UpsertValidatorRequest
+			if err := json.Unmarshal(transaction.Payload, &payload); err != nil {
+				return nil, fmt.Errorf("decode upsert_validator payload: %w", err)
+			}
+			index[strings.TrimSpace(payload.Validator)] = protocol.Validator{
+				Address:   strings.TrimSpace(payload.Validator),
+				PublicKey: strings.ToLower(strings.TrimSpace(payload.PublicKey)),
+				Power:     payload.Power,
+			}
+		case protocol.TxTypeDeactivateValidator:
+			var payload protocol.DeactivateValidatorRequest
+			if err := json.Unmarshal(transaction.Payload, &payload); err != nil {
+				return nil, fmt.Errorf("decode deactivate_validator payload: %w", err)
+			}
+			delete(index, strings.TrimSpace(payload.Validator))
+		}
+	}
+
+	next := make([]protocol.Validator, 0, len(index))
+	for _, validator := range index {
+		next = append(next, validator)
+	}
+	sort.Slice(next, func(i, j int) bool {
+		if next[i].Address == next[j].Address {
+			return next[i].PublicKey < next[j].PublicKey
+		}
+		return next[i].Address < next[j].Address
+	})
+	return next, nil
+}
+
 func voteKey(height int64, round int, voteType string, blockHash string) string {
 	return fmt.Sprintf("%d/%d/%s/%s", height, round, voteType, blockHash)
 }
@@ -349,6 +431,44 @@ func roundChangeSignBytes(message protocol.ConsensusRoundChange) []byte {
 		Round:     message.Round,
 		Validator: message.Validator,
 		Reason:    strings.TrimSpace(message.Reason),
+	})
+}
+
+func peerHelloSignBytes(message protocol.PeerHello) []byte {
+	type signablePeerHello struct {
+		NodeID           string    `json:"node_id"`
+		ChainID          string    `json:"chain_id"`
+		ListenAddr       string    `json:"listen_addr"`
+		ValidatorAddress string    `json:"validator_address"`
+		SeenAt           time.Time `json:"seen_at"`
+	}
+	return mustMarshal(signablePeerHello{
+		NodeID:           strings.TrimSpace(message.NodeID),
+		ChainID:          strings.TrimSpace(message.ChainID),
+		ListenAddr:       strings.TrimSpace(message.ListenAddr),
+		ValidatorAddress: strings.TrimSpace(message.ValidatorAddress),
+		SeenAt:           message.SeenAt.UTC(),
+	})
+}
+
+func peerStatusSignBytes(status protocol.PeerStatus) []byte {
+	type signablePeerStatus struct {
+		NodeID           string    `json:"node_id"`
+		ChainID          string    `json:"chain_id"`
+		ListenAddr       string    `json:"listen_addr"`
+		ValidatorAddress string    `json:"validator_address"`
+		HeadHeight       int64     `json:"head_height"`
+		HeadHash         string    `json:"head_hash"`
+		ObservedAt       time.Time `json:"observed_at"`
+	}
+	return mustMarshal(signablePeerStatus{
+		NodeID:           strings.TrimSpace(status.NodeID),
+		ChainID:          strings.TrimSpace(status.ChainID),
+		ListenAddr:       strings.TrimSpace(status.ListenAddr),
+		ValidatorAddress: strings.TrimSpace(status.ValidatorAddress),
+		HeadHeight:       status.HeadHeight,
+		HeadHash:         strings.TrimSpace(status.HeadHash),
+		ObservedAt:       status.ObservedAt.UTC(),
 	})
 }
 

@@ -228,7 +228,7 @@ func TestEngineCommitsOnPrecommitQuorum(t *testing.T) {
 	}
 
 	backend := &mockBackend{}
-	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080"), backend)
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestEngineRecordsDoubleVoteEvidence(t *testing.T) {
 	}
 
 	backend := &mockBackend{}
-	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080"), backend)
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestHandleRoundChangeAdvancesRoundAfterQuorum(t *testing.T) {
 	}
 
 	backend := &mockBackend{}
-	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080"), backend)
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestEngineRecoversPersistedRoundChanges(t *testing.T) {
 	backend := &mockBackend{
 		roundChanges: []protocol.ConsensusRoundChange{rc1, rc2},
 	}
-	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080"), backend)
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

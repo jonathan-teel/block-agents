@@ -44,6 +44,26 @@ func (s *Store) initChain(ctx context.Context) error {
 			return fmt.Errorf("insert genesis account %s: %w", account.Address, err)
 		}
 	}
+	if err := ensureTreasuryAccountTx(ctx, tx, s.cfg); err != nil {
+		return fmt.Errorf("ensure treasury account: %w", err)
+	}
+	for _, validator := range s.cfg.Genesis.Validators {
+		if err := ensureAgentExistsTx(ctx, tx, validator.Address, s.cfg.DefaultAgentReputation); err != nil {
+			return fmt.Errorf("ensure genesis validator account %s: %w", validator.Address, err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO validator_registry (address, public_key, power, active, created_at, updated_at)
+			 VALUES ($1, $2, $3, TRUE, $4, $4)
+			 ON CONFLICT (address) DO NOTHING`,
+			validator.Address,
+			validator.PublicKey,
+			validator.Power,
+			s.cfg.Genesis.GenesisTime,
+		); err != nil {
+			return fmt.Errorf("insert genesis validator %s: %w", validator.Address, err)
+		}
+	}
 
 	stateRoot, err := computeStateRootTx(ctx, tx)
 	if err != nil {
@@ -102,6 +122,28 @@ func (s *Store) initChain(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) syncSystemAccounts(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin system account sync transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := ensureTreasuryAccountTx(ctx, tx, s.cfg); err != nil {
+		return fmt.Errorf("ensure treasury account: %w", err)
+	}
+	for _, validator := range s.cfg.Genesis.Validators {
+		if err := ensureAgentExistsTx(ctx, tx, validator.Address, s.cfg.DefaultAgentReputation); err != nil {
+			return fmt.Errorf("ensure validator account %s: %w", validator.Address, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit system account sync transaction: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetChainInfo(ctx context.Context) (protocol.ChainInfo, error) {
 	meta, err := getMetadata(ctx, s.db)
 	if err != nil {
@@ -118,8 +160,8 @@ func (s *Store) GetChainInfo(ctx context.Context) (protocol.ChainInfo, error) {
 		HeadHash:    meta.HeadHash,
 		GenesisHash: meta.GenesisHash,
 		SchemaVersion: s.schemaVersion,
-		RoleSelectionPolicy: s.cfg.RoleSelectionPolicy,
-		MinerVotePolicy: s.cfg.MinerVotePolicy,
+		RoleSelectionPolicy: effectiveRoleSelectionPolicyTx(ctx, s.db, s.cfg),
+		MinerVotePolicy: effectiveMinerVotePolicyTx(ctx, s.db, s.cfg),
 		ReorgPolicy: s.cfg.ReorgPolicy,
 	}, nil
 }
@@ -405,16 +447,21 @@ func buildCandidateBlockTx(ctx context.Context, tx *sql.Tx, meta chainMetadata, 
 	if err != nil {
 		return nil, false, err
 	}
+	governanceEvents, err := finalizeGovernanceProposalsTx(ctx, tx, store.cfg, opts.Now.Unix())
+	if err != nil {
+		return nil, false, err
+	}
 	settlementEvents, err := store.settleExpiredTasksTx(ctx, tx, opts.Now.Unix())
 	if err != nil {
 		return nil, false, err
 	}
-	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, opts.Now.Unix(), store.cfg.ValidatorSlashFraction, store.cfg.ValidatorSlashReputationPenalty)
+	slashingEvents, err := applyConsensusEvidencePenaltiesTx(ctx, tx, store.cfg, opts.Now.Unix(), store.cfg.ValidatorSlashFraction, store.cfg.ValidatorSlashReputationPenalty)
 	if err != nil {
 		return nil, false, err
 	}
 
 	events := append(consensusEvents, debateEvents...)
+	events = append(events, governanceEvents...)
 	events = append(events, settlementEvents...)
 	events = append(events, slashingEvents...)
 	if len(transactions) == 0 && len(events) == 0 && !opts.CreateEmptyBlocks {

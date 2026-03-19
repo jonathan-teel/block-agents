@@ -22,6 +22,10 @@ type Config struct {
 	NodeID                  string
 	ValidatorAddress        string
 	ValidatorPrivateKey     string
+	PeerBaseBackoff         time.Duration
+	PeerMaxBackoff          time.Duration
+	PeerHelloMinInterval    time.Duration
+	PeerBroadcastDedupTTL   time.Duration
 	ConsensusRoundTimeout   time.Duration
 	SyncLookaheadBlocks     int
 	RoleSelectionPolicy     string
@@ -32,6 +36,12 @@ type Config struct {
 	MinVotesPerRound        int
 	ValidatorSlashFraction  float64
 	ValidatorSlashReputationPenalty float64
+	TreasuryAddress         string
+	TaskDisputeWindow       time.Duration
+	TaskDisputeBond         float64
+	OraclePollInterval      time.Duration
+	OracleHTTPTimeout       int
+	AllowPrivateOracleEndpoints bool
 	BlockInterval           time.Duration
 	MaxTransactionsPerBlock int
 	MaxEffectiveWeight      float64
@@ -57,6 +67,10 @@ func Load() (Config, error) {
 		NodeID:                  getEnv("NODE_ID", hostname),
 		ValidatorAddress:        getEnv("VALIDATOR_ADDRESS", "validator-1"),
 		ValidatorPrivateKey:     txauth.NormalizePublicKey(os.Getenv("VALIDATOR_PRIVATE_KEY")),
+		PeerBaseBackoff:         time.Duration(getIntEnv("PEER_BASE_BACKOFF_SECONDS", 2)) * time.Second,
+		PeerMaxBackoff:          time.Duration(getIntEnv("PEER_MAX_BACKOFF_SECONDS", 60)) * time.Second,
+		PeerHelloMinInterval:    time.Duration(getIntEnv("PEER_HELLO_MIN_INTERVAL_SECONDS", 3)) * time.Second,
+		PeerBroadcastDedupTTL:   time.Duration(getIntEnv("PEER_BROADCAST_DEDUP_SECONDS", 30)) * time.Second,
 		ConsensusRoundTimeout:   time.Duration(getIntEnv("CONSENSUS_ROUND_TIMEOUT_SECONDS", 10)) * time.Second,
 		SyncLookaheadBlocks:     getIntEnv("SYNC_LOOKAHEAD_BLOCKS", 6),
 		RoleSelectionPolicy:     getEnv("ROLE_SELECTION_POLICY", "balance_reputation"),
@@ -67,6 +81,12 @@ func Load() (Config, error) {
 		MinVotesPerRound:        getIntEnv("MIN_VOTES_PER_ROUND", 1),
 		ValidatorSlashFraction:  getFloatEnv("VALIDATOR_SLASH_FRACTION", 0.1),
 		ValidatorSlashReputationPenalty: getFloatEnv("VALIDATOR_SLASH_REPUTATION_PENALTY", 0.2),
+		TreasuryAddress:         getEnv("TREASURY_ADDRESS", "treasury"),
+		TaskDisputeWindow:       time.Duration(getIntEnv("TASK_DISPUTE_WINDOW_SECONDS", 3600)) * time.Second,
+		TaskDisputeBond:         getFloatEnv("TASK_DISPUTE_BOND", 25),
+		OraclePollInterval:      time.Duration(getIntEnv("ORACLE_POLL_INTERVAL_SECONDS", 15)) * time.Second,
+		OracleHTTPTimeout:       getIntEnv("ORACLE_HTTP_TIMEOUT_SECONDS", 10),
+		AllowPrivateOracleEndpoints: getBoolEnv("ALLOW_PRIVATE_ORACLE_ENDPOINTS", false),
 		BlockInterval:           time.Duration(getIntEnv("BLOCK_INTERVAL_SECONDS", 5)) * time.Second,
 		MaxTransactionsPerBlock: getIntEnv("MAX_TRANSACTIONS_PER_BLOCK", 250),
 		MaxEffectiveWeight:      getFloatEnv("MAX_EFFECTIVE_WEIGHT", 100),
@@ -81,6 +101,18 @@ func Load() (Config, error) {
 	}
 	if cfg.BlockInterval <= 0 {
 		return Config{}, fmt.Errorf("BLOCK_INTERVAL_SECONDS must be > 0")
+	}
+	if cfg.PeerBaseBackoff <= 0 {
+		return Config{}, fmt.Errorf("PEER_BASE_BACKOFF_SECONDS must be > 0")
+	}
+	if cfg.PeerMaxBackoff < cfg.PeerBaseBackoff {
+		return Config{}, fmt.Errorf("PEER_MAX_BACKOFF_SECONDS must be >= PEER_BASE_BACKOFF_SECONDS")
+	}
+	if cfg.PeerHelloMinInterval <= 0 {
+		return Config{}, fmt.Errorf("PEER_HELLO_MIN_INTERVAL_SECONDS must be > 0")
+	}
+	if cfg.PeerBroadcastDedupTTL <= 0 {
+		return Config{}, fmt.Errorf("PEER_BROADCAST_DEDUP_SECONDS must be > 0")
 	}
 	if cfg.ConsensusRoundTimeout <= 0 {
 		return Config{}, fmt.Errorf("CONSENSUS_ROUND_TIMEOUT_SECONDS must be > 0")
@@ -111,6 +143,21 @@ func Load() (Config, error) {
 	}
 	if cfg.ValidatorSlashReputationPenalty < 0 || cfg.ValidatorSlashReputationPenalty > 1 {
 		return Config{}, fmt.Errorf("VALIDATOR_SLASH_REPUTATION_PENALTY must be within [0,1]")
+	}
+	if strings.TrimSpace(cfg.TreasuryAddress) == "" {
+		return Config{}, fmt.Errorf("TREASURY_ADDRESS is required")
+	}
+	if cfg.TaskDisputeWindow <= 0 {
+		return Config{}, fmt.Errorf("TASK_DISPUTE_WINDOW_SECONDS must be > 0")
+	}
+	if cfg.TaskDisputeBond <= 0 {
+		return Config{}, fmt.Errorf("TASK_DISPUTE_BOND must be > 0")
+	}
+	if cfg.OraclePollInterval <= 0 {
+		return Config{}, fmt.Errorf("ORACLE_POLL_INTERVAL_SECONDS must be > 0")
+	}
+	if cfg.OracleHTTPTimeout <= 0 {
+		return Config{}, fmt.Errorf("ORACLE_HTTP_TIMEOUT_SECONDS must be > 0")
 	}
 	if cfg.RoleSelectionPolicy != "balance_reputation" && cfg.RoleSelectionPolicy != "reputation_balance" && cfg.RoleSelectionPolicy != "round_robin_hash" {
 		return Config{}, fmt.Errorf("ROLE_SELECTION_POLICY must be one of balance_reputation, reputation_balance, round_robin_hash")
@@ -169,6 +216,7 @@ func defaultGenesis(chainID string) protocol.Genesis {
 		FaucetAddress: "faucet",
 		Accounts: []protocol.GenesisAccount{
 			{Address: "faucet", Balance: 1_000_000, Reputation: 1},
+			{Address: "treasury", Balance: 0, Reputation: 1},
 			{Address: "alice", Balance: 10_000, Reputation: 0.65},
 			{Address: "bob", Balance: 10_000, Reputation: 0.6},
 			{Address: "carol", Balance: 10_000, Reputation: 0.55},

@@ -8,8 +8,8 @@ import (
 
 func TestComputeStageDurationSeconds(t *testing.T) {
 	duration := ComputeStageDurationSeconds(100, 190, 2)
-	if duration != 15 {
-		t.Fatalf("expected duration 15, got %d", duration)
+	if duration != 11 {
+		t.Fatalf("expected duration 11, got %d", duration)
 	}
 }
 
@@ -17,6 +17,11 @@ func TestNextDebateState(t *testing.T) {
 	round, stage, terminal := NextDebateState(1, protocol.DebateStageProposal, 2)
 	if round != 1 || stage != protocol.DebateStageEvaluation || terminal {
 		t.Fatalf("unexpected proposal transition: round=%d stage=%s terminal=%v", round, stage, terminal)
+	}
+
+	round, stage, terminal = NextDebateState(1, protocol.DebateStageEvaluation, 2)
+	if round != 1 || stage != protocol.DebateStageRebuttal || terminal {
+		t.Fatalf("unexpected evaluation transition: round=%d stage=%s terminal=%v", round, stage, terminal)
 	}
 
 	round, stage, terminal = NextDebateState(1, protocol.DebateStageVote, 2)

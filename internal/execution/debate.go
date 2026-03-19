@@ -2,7 +2,7 @@ package execution
 
 import "aichain/internal/protocol"
 
-const stagesPerRound = 3
+const stagesPerRound = 4
 
 func ComputeStageDurationSeconds(nowUnix int64, deadlineUnix int64, rounds int) int64 {
 	totalStages := maxInt(rounds, 1) * stagesPerRound
@@ -22,6 +22,8 @@ func NextDebateState(currentRound int, currentStage string, maxRounds int) (int,
 	case protocol.DebateStageProposal:
 		return currentRound, protocol.DebateStageEvaluation, false
 	case protocol.DebateStageEvaluation:
+		return currentRound, protocol.DebateStageRebuttal, false
+	case protocol.DebateStageRebuttal:
 		return currentRound, protocol.DebateStageVote, false
 	case protocol.DebateStageVote:
 		if currentRound >= maxInt(maxRounds, 1) {

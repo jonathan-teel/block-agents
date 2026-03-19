@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -17,11 +18,7 @@ func (s *Store) syncValidatorRegistry(ctx context.Context) error {
 			ctx,
 			`INSERT INTO validator_registry (address, public_key, power, active, updated_at)
 			 VALUES ($1, $2, $3, TRUE, NOW())
-			 ON CONFLICT (address) DO UPDATE
-			 SET public_key = EXCLUDED.public_key,
-			     power = EXCLUDED.power,
-			     active = TRUE,
-			     updated_at = NOW()`,
+			 ON CONFLICT (address) DO NOTHING`,
 			validator.Address,
 			validator.PublicKey,
 			validator.Power,
@@ -51,10 +48,38 @@ func (s *Store) ListValidators(ctx context.Context) ([]protocol.Validator, error
 		if err := rows.Scan(&validator.Address, &validator.PublicKey, &validator.Power); err != nil {
 			return nil, fmt.Errorf("scan validator registry: %w", err)
 		}
+		validator.Active = true
 		validators = append(validators, validator)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate validator registry: %w", err)
+	}
+
+	return validators, nil
+}
+
+func (s *Store) ListValidatorRegistry(ctx context.Context) ([]protocol.Validator, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT address, public_key, power, active
+		 FROM validator_registry
+		 ORDER BY address ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query full validator registry: %w", err)
+	}
+	defer rows.Close()
+
+	validators := make([]protocol.Validator, 0)
+	for rows.Next() {
+		var validator protocol.Validator
+		if err := rows.Scan(&validator.Address, &validator.PublicKey, &validator.Power, &validator.Active); err != nil {
+			return nil, fmt.Errorf("scan full validator registry: %w", err)
+		}
+		validators = append(validators, validator)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate full validator registry: %w", err)
 	}
 
 	return validators, nil
@@ -242,4 +267,113 @@ func forkChoiceBetterCertificate(candidate protocol.QuorumCertificate, current p
 		return candidate.CertifiedAt.Before(current.CertifiedAt)
 	}
 	return candidate.BlockHash < current.BlockHash
+}
+
+func isActiveValidatorTx(ctx context.Context, tx *sql.Tx, address string) (bool, error) {
+	var count int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(1)
+		 FROM validator_registry
+		 WHERE address = $1 AND active = TRUE`,
+		strings.TrimSpace(address),
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("query active validator: %w", err)
+	}
+	return count > 0, nil
+}
+
+func countActiveValidatorsTx(ctx context.Context, tx *sql.Tx) (int, error) {
+	var count int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(1)
+		 FROM validator_registry
+		 WHERE active = TRUE`,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active validators: %w", err)
+	}
+	return count, nil
+}
+
+func ensureAgentExistsTx(ctx context.Context, tx *sql.Tx, address string, defaultReputation float64) error {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return fmt.Errorf("%w: agent address is required", ErrValidation)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO agents (address, next_nonce, balance, reputation, created_at, updated_at)
+		 VALUES ($1, 0, 0, $2, NOW(), NOW())
+		 ON CONFLICT (address) DO NOTHING`,
+		address,
+		defaultReputation,
+	); err != nil {
+		return fmt.Errorf("ensure validator agent account: %w", err)
+	}
+	return nil
+}
+
+func upsertValidatorRegistryTx(ctx context.Context, tx *sql.Tx, address string, publicKey string, power int64, defaultReputation float64) error {
+	address = strings.TrimSpace(address)
+	publicKey = strings.ToLower(strings.TrimSpace(publicKey))
+	if address == "" || publicKey == "" || power <= 0 {
+		return fmt.Errorf("%w: invalid validator update", ErrValidation)
+	}
+	decoded, err := hex.DecodeString(publicKey)
+	if err != nil || len(decoded) != 32 {
+		return fmt.Errorf("%w: validator public_key must be a 32-byte hex ed25519 key", ErrValidation)
+	}
+	if err := ensureAgentExistsTx(ctx, tx, address, defaultReputation); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO validator_registry (address, public_key, power, active, created_at, updated_at)
+		 VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+		 ON CONFLICT (address) DO UPDATE
+		 SET public_key = EXCLUDED.public_key,
+		     power = EXCLUDED.power,
+		     active = TRUE,
+		     updated_at = NOW()`,
+		address,
+		publicKey,
+		power,
+	); err != nil {
+		return fmt.Errorf("upsert validator registry: %w", err)
+	}
+	return nil
+}
+
+func deactivateValidatorRegistryTx(ctx context.Context, tx *sql.Tx, address string) error {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return fmt.Errorf("%w: validator is required", ErrValidation)
+	}
+	activeCount, err := countActiveValidatorsTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if activeCount <= 1 {
+		return fmt.Errorf("%w: cannot deactivate the last active validator", ErrValidation)
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE validator_registry
+		 SET active = FALSE,
+		     updated_at = NOW()
+		 WHERE address = $1 AND active = TRUE`,
+		address,
+	)
+	if err != nil {
+		return fmt.Errorf("deactivate validator registry: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read deactivated validator rows: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

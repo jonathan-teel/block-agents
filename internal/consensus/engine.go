@@ -23,6 +23,7 @@ type Engine struct {
 	committer  Committer
 	validator  CandidateValidator
 	chainState ChainStateReader
+	validatorReader ValidatorSetReader
 	set        ValidatorSet
 	tracker    *VoteTracker
 	privateKey ed25519.PrivateKey
@@ -106,6 +107,7 @@ func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine,
 		committer:        backend,
 		validator:        backend,
 		chainState:       backend,
+		validatorReader:  nil,
 		set:              set,
 		tracker:          NewVoteTracker(set),
 		proposals:        make(map[string]protocol.ConsensusProposal),
@@ -119,6 +121,9 @@ func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine,
 		currentRounds:    make(map[int64]int),
 		observedAt:       make(map[int64]time.Time),
 		roundChanges:     make(map[string]map[string]protocol.ConsensusRoundChange),
+	}
+	if reader, ok := backend.(ValidatorSetReader); ok {
+		engine.validatorReader = reader
 	}
 
 	if strings.TrimSpace(cfg.ValidatorPrivateKey) != "" {
@@ -140,6 +145,23 @@ func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine,
 
 func (e *Engine) Validators() []protocol.Validator {
 	return e.set.Validators()
+}
+
+func (e *Engine) ReloadValidatorSet(ctx context.Context) error {
+	if e.validatorReader == nil {
+		return nil
+	}
+	validators, err := e.validatorReader.ListValidators(ctx)
+	if err != nil {
+		return err
+	}
+	set := NewValidatorSet(validators)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.set = set
+	e.tracker = NewVoteTracker(set)
+	return nil
 }
 
 func (e *Engine) CurrentRound(height int64) int {
@@ -387,6 +409,64 @@ func (e *Engine) VerifyCertifiedBlock(bundle protocol.CertifiedBlock) error {
 	return VerifyCertifiedBlock(e.set, bundle)
 }
 
+func (e *Engine) VerifyCertifiedBranch(bundles []protocol.CertifiedBlock) error {
+	validators := e.Validators()
+	set := NewValidatorSet(validators)
+	for _, bundle := range bundles {
+		if err := VerifyCertifiedBlock(set, bundle); err != nil {
+			return err
+		}
+		next, err := ApplyValidatorUpdates(set.Validators(), bundle.Block)
+		if err != nil {
+			return err
+		}
+		set = NewValidatorSet(next)
+	}
+	return nil
+}
+
+func (e *Engine) SignPeerHello(message protocol.PeerHello) (protocol.PeerHello, error) {
+	if len(e.privateKey) == 0 || strings.TrimSpace(e.cfg.ValidatorAddress) == "" {
+		return message, nil
+	}
+	message.ValidatorAddress = e.cfg.ValidatorAddress
+	message.ChainID = e.cfg.ChainID
+	signature, err := SignPeerHello(message, e.privateKey)
+	if err != nil {
+		return protocol.PeerHello{}, err
+	}
+	message.Signature = signature
+	return message, nil
+}
+
+func (e *Engine) VerifyPeerHello(message protocol.PeerHello) error {
+	if message.ChainID != e.cfg.ChainID {
+		return fmt.Errorf("unexpected peer hello chain_id %s", message.ChainID)
+	}
+	return VerifyPeerHello(e.set, message)
+}
+
+func (e *Engine) SignPeerStatus(status protocol.PeerStatus) (protocol.PeerStatus, error) {
+	if len(e.privateKey) == 0 || strings.TrimSpace(e.cfg.ValidatorAddress) == "" {
+		return status, nil
+	}
+	status.ValidatorAddress = e.cfg.ValidatorAddress
+	status.ChainID = e.cfg.ChainID
+	signature, err := SignPeerStatus(status, e.privateKey)
+	if err != nil {
+		return protocol.PeerStatus{}, err
+	}
+	status.Signature = signature
+	return status, nil
+}
+
+func (e *Engine) VerifyPeerStatus(status protocol.PeerStatus) error {
+	if status.ChainID != e.cfg.ChainID {
+		return fmt.Errorf("unexpected peer status chain_id %s", status.ChainID)
+	}
+	return VerifyPeerStatus(e.set, status)
+}
+
 func (e *Engine) PreferredCertificate(height int64) (protocol.QuorumCertificate, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -594,6 +674,9 @@ func (e *Engine) commitCertifiedBlock(ctx context.Context, certificate protocol.
 	delete(e.observedAt, certificate.Height)
 	delete(e.currentRounds, certificate.Height)
 	e.mu.Unlock()
+	if err := e.ReloadValidatorSet(ctx); err != nil {
+		return err
+	}
 	if e.peers != nil {
 		e.peers.BroadcastCertifiedBlock(ctx, bundle)
 	}
