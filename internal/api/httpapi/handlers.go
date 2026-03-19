@@ -142,6 +142,7 @@ func (h *Handler) GetPeerStatus(c *gin.Context) {
 	status := protocol.PeerStatus{
 		NodeID:           h.cfg.NodeID,
 		ChainID:          h.cfg.ChainID,
+		GenesisHash:      info.GenesisHash,
 		ListenAddr:       h.cfg.P2PListenAddr,
 		ValidatorAddress: h.cfg.ValidatorAddress,
 		HeadHeight:       info.HeadHeight,
@@ -353,10 +354,10 @@ func (h *Handler) PeerHello(c *gin.Context) {
 		status := protocol.PeerStatus{
 			NodeID:           hello.NodeID,
 			ChainID:          hello.ChainID,
+			GenesisHash:      hello.GenesisHash,
 			ListenAddr:       hello.ListenAddr,
 			ValidatorAddress: hello.ValidatorAddress,
 			ObservedAt:       hello.SeenAt,
-			Signature:        hello.Signature,
 		}
 		h.peers.RememberPeer(status)
 		_ = h.store.UpsertPeer(c.Request.Context(), status)

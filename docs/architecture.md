@@ -49,7 +49,7 @@ Transaction families:
 - blockagents votes
 - agent key bootstrap
 - agent key rotation
-- validator membership updates
+- validator membership queries
 - dispute open and dispute resolution
 - governance proposal and governance vote
 - oracle-backed prediction task creation
@@ -103,10 +103,12 @@ The state machine spans:
 
 The node also carries an experimental validator-consensus layer for:
 
-- persistent validator registry with authenticated membership updates
+- persistent validator registry with explicit active-set tracking
 - validator-signed peer hello and peer status admission
+- genesis-hash-bound peer admission and snapshot recovery
 - transitive peer discovery backed by `peer_registry`
 - peer health scoring, retry backoff, and duplicate-broadcast suppression
+- peer endpoint validation and bounded HTTP message sizes
 - validator-set proposer selection
 - follower-side candidate-block fetch and replay validation
 - conflict detection for equivocation
@@ -116,7 +118,7 @@ The node also carries an experimental validator-consensus layer for:
 - quorum certificate formation
 - certified block propagation over the P2P transport
 - persistent fork-choice preference by height
-- validator-aware branch verification across membership changes
+- validator-aware branch verification against the persisted active set
 - best-certified branch preference through common-ancestor certified sync
 - replay-based deep canonical reorg support under `REORG_POLICY=best_certified`
 - retained-window state snapshot export and import for catch-up sync
@@ -225,7 +227,7 @@ BlockAgents enforces it through:
 Not implemented yet:
 
 - full cryptographic verification of proof-of-thought semantic truth
-- stronger peer admission and transport hardening beyond validator-signed identity, retry backoff, hello rate limits, duplicate suppression, and transitive peer discovery
+- governed validator-set mutation instead of the current static/administratively managed registry model
 - production-grade trust minimization for snapshot/state sync beyond retained-window certified-state verification
 - broader oracle-source diversity beyond the current HTTP JSON adapter
 

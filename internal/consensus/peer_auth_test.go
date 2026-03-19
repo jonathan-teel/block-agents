@@ -25,6 +25,7 @@ func TestSignAndVerifyPeerHello(t *testing.T) {
 	message := protocol.PeerHello{
 		NodeID:           "node-1",
 		ChainID:          "blockagents-devnet-1",
+		GenesisHash:      "genesis-hash",
 		ListenAddr:       "http://127.0.0.1:8080",
 		ValidatorAddress: "validator-1",
 		SeenAt:           time.Unix(1_700_000_000, 0).UTC(),
@@ -56,6 +57,7 @@ func TestSignAndVerifyPeerStatus(t *testing.T) {
 	status := protocol.PeerStatus{
 		NodeID:           "node-1",
 		ChainID:          "blockagents-devnet-1",
+		GenesisHash:      "genesis-hash",
 		ListenAddr:       "http://127.0.0.1:8080",
 		ValidatorAddress: "validator-1",
 		HeadHeight:       42,
@@ -73,4 +75,3 @@ func TestSignAndVerifyPeerStatus(t *testing.T) {
 		t.Fatalf("verify peer status: %v", err)
 	}
 }
-

@@ -285,6 +285,7 @@ type ConsensusRoundChange struct {
 type PeerStatus struct {
 	NodeID           string    `json:"node_id"`
 	ChainID          string    `json:"chain_id"`
+	GenesisHash      string    `json:"genesis_hash"`
 	ListenAddr       string    `json:"listen_addr"`
 	ValidatorAddress string    `json:"validator_address,omitempty"`
 	HeadHeight       int64     `json:"head_height"`
@@ -296,6 +297,7 @@ type PeerStatus struct {
 type PeerHello struct {
 	NodeID           string    `json:"node_id"`
 	ChainID          string    `json:"chain_id"`
+	GenesisHash      string    `json:"genesis_hash"`
 	ListenAddr       string    `json:"listen_addr"`
 	ValidatorAddress string    `json:"validator_address,omitempty"`
 	SeenAt           time.Time `json:"seen_at"`

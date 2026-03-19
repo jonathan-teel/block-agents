@@ -11,6 +11,7 @@ import (
 func TestAllowHelloRateLimit(t *testing.T) {
 	manager := New("http://127.0.0.1:8080", Options{
 		HelloMinInterval: 50 * time.Millisecond,
+		AllowPrivateEndpoints: true,
 	})
 
 	now := time.Now().UTC()
@@ -28,6 +29,7 @@ func TestAllowHelloRateLimit(t *testing.T) {
 func TestBroadcastDedupWindow(t *testing.T) {
 	manager := New("http://127.0.0.1:8080", Options{
 		BroadcastDedupTTL: 20 * time.Millisecond,
+		AllowPrivateEndpoints: true,
 	})
 
 	if !manager.shouldBroadcast("proposal/1/0/block-a") {
@@ -44,8 +46,9 @@ func TestBroadcastDedupWindow(t *testing.T) {
 
 func TestPeerBackoffAndTelemetry(t *testing.T) {
 	manager := New("http://127.0.0.1:8080", Options{
-		BaseBackoff: 10 * time.Millisecond,
-		MaxBackoff:  20 * time.Millisecond,
+		BaseBackoff:           10 * time.Millisecond,
+		MaxBackoff:            20 * time.Millisecond,
+		AllowPrivateEndpoints: true,
 	})
 	manager.RememberPeer(protocol.PeerStatus{
 		NodeID:     "node-1",
@@ -77,3 +80,15 @@ func TestPeerBackoffAndTelemetry(t *testing.T) {
 	}
 }
 
+func TestRememberPeerRejectsPrivateEndpointByDefault(t *testing.T) {
+	manager := New("https://public.example", Options{})
+	manager.RememberPeer(protocol.PeerStatus{
+		NodeID:     "node-1",
+		ChainID:    "blockagents-devnet-1",
+		ListenAddr: "http://127.0.0.1:8081",
+		ObservedAt: time.Now().UTC(),
+	})
+	if len(manager.Peers()) != 0 {
+		t.Fatal("expected private peer endpoint to be rejected by default")
+	}
+}

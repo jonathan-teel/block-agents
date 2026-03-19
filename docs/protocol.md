@@ -16,7 +16,7 @@ The main workflow is inspired by blockchain-mediated LLM coordination systems:
 - miner agents vote on proposals by debate round
 - the chain finalizes a winning proposal and distributes rewards
 
-On the networking side, nodes exchange peer status, discover additional peers from known peers, propagate certified blocks, verify certified branches across validator-set changes, and fall back to retained-window state snapshots when branch replay is not the best recovery path.
+On the networking side, nodes exchange peer status, discover additional peers from known peers, propagate certified blocks, verify certified branches against the persisted active validator set, and fall back to retained-window state snapshots when branch replay is not the best recovery path. Peer admission and snapshot sync are bound to the local `genesis_hash`.
 
 Prediction-family tasks may also attach an external oracle adapter so settlement can resolve against persisted off-chain data rather than the built-in synthetic outcome path.
 
@@ -137,7 +137,7 @@ Quorum is calculated as:
 floor((2 * total_voting_power) / 3) + 1
 ```
 
-The reference node persists the validator set in `validator_registry` so validator membership changes can be executed on-chain, exported in snapshots, and reused when consensus state is recovered after restart.
+The reference node persists the validator set in `validator_registry` so active membership can be exported in snapshots and reused when consensus state is recovered after restart. Direct validator-set mutation transactions are disabled in the reference client.
 
 ### Consensus Messages
 
@@ -171,7 +171,7 @@ The current devnet flow is:
 6. if the round stalls, validators emit signed `ConsensusRoundChange` messages and proposer selection advances to the next round after quorum
 7. round-change messages are persisted so quorum-derived round state can be recovered after restart
 8. once `precommit` quorum forms, the preferred certified block is imported into canonical state and propagated to peers
-9. during peer sync, nodes find a common ancestor with candidate peers, fetch the certified suffix, verify it with validator-set updates applied block by block, and persist per-height fork-choice preferences
+9. during peer sync, nodes find a common ancestor with candidate peers, fetch the certified suffix, verify it against the persisted active validator set, and persist per-height fork-choice preferences
 10. under `REORG_POLICY=best_certified`, nodes may replace the canonical suffix with a stronger certified branch discovered through that common-ancestor sync path
 11. if branch replay is not the best recovery path, the node may import a retained-window state snapshot whose certified tip and recomputed state root are verified before acceptance
 
@@ -191,6 +191,7 @@ Peer admission is validator-authenticated in the reference client.
 
 - `node_id`
 - `chain_id`
+- `genesis_hash`
 - `listen_addr`
 - `validator_address`
 - timestamp field (`seen_at` or `observed_at`)
@@ -199,6 +200,7 @@ Peer admission is validator-authenticated in the reference client.
 Admission rules:
 
 - `chain_id` must match the local chain
+- `genesis_hash` must match the local chain
 - `validator_address` must exist in the active validator set
 - the message signature must verify against that validator public key
 
@@ -259,10 +261,11 @@ A snapshot contains:
 Snapshot acceptance rules:
 
 1. `chain_id` must match the local chain
-2. the head block hash must match its header
-3. the certified window must be contiguous and end at the advertised head block
-4. every certified bundle in the retained window must pass quorum and signature verification
-5. after import, the local state root recomputed from imported execution state must match the advertised head state root
+2. `genesis_hash` must match the local chain
+3. the head block hash must match its header
+4. the certified window must be contiguous and end at the advertised head block
+5. every certified bundle in the retained window must pass quorum and signature verification
+6. after import, the local state root recomputed from imported execution state must match the advertised head state root
 
 The snapshot path is intended for devnet and operator-managed recovery. It verifies the retained certified window, the imported head block, and the recomputed state root, but it is not a full trust-minimized production state-sync protocol.
 
@@ -293,7 +296,7 @@ Execution rules:
 
 ### `upsert_validator`
 
-Adds a validator to the persistent validator registry or updates its public key and voting power.
+Legacy transaction type. Direct validator-set mutation transactions are disabled in the reference client.
 
 Payload:
 
@@ -306,17 +309,13 @@ Payload:
 }
 ```
 
-Execution rules:
+Execution result:
 
-- the sender must match `operator`
-- `operator` must already be an active validator
-- `public_key` must be a valid Ed25519 public key encoding
-- successful execution activates the target validator in `validator_registry`
-- updated membership takes effect for proposer selection and certified-branch verification after the block is imported
+- the transaction is rejected as a disabled direct validator-set mutation path
 
 ### `deactivate_validator`
 
-Marks a validator inactive in the persistent validator registry.
+Legacy transaction type. Direct validator-set mutation transactions are disabled in the reference client.
 
 Payload:
 
@@ -327,13 +326,9 @@ Payload:
 }
 ```
 
-Execution rules:
+Execution result:
 
-- the sender must match `operator`
-- `operator` must already be an active validator
-- the target validator must exist
-- execution must not deactivate the last active validator
-- deactivation takes effect for proposer selection and certified-branch verification after the block is imported
+- the transaction is rejected as a disabled direct validator-set mutation path
 
 ### `open_dispute`
 

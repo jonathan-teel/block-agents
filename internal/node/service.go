@@ -34,10 +34,12 @@ func New(cfg config.Config) (*Service, error) {
 	}
 
 	peers := p2p.New(cfg.P2PListenAddr, p2p.Options{
-		BaseBackoff:       cfg.PeerBaseBackoff,
-		MaxBackoff:        cfg.PeerMaxBackoff,
-		BroadcastDedupTTL: cfg.PeerBroadcastDedupTTL,
-		HelloMinInterval:  cfg.PeerHelloMinInterval,
+		BaseBackoff:          cfg.PeerBaseBackoff,
+		MaxBackoff:           cfg.PeerMaxBackoff,
+		BroadcastDedupTTL:    cfg.PeerBroadcastDedupTTL,
+		HelloMinInterval:     cfg.PeerHelloMinInterval,
+		AllowPrivateEndpoints: cfg.AllowPrivateP2PEndpoints,
+		MaxResponseBytes:     cfg.MaxP2PResponseBytes,
 	})
 	loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -134,6 +136,7 @@ func (s *Service) announceSelf(ctx context.Context) {
 		status := protocol.PeerStatus{
 			NodeID:           s.cfg.NodeID,
 			ChainID:          s.cfg.ChainID,
+			GenesisHash:      info.GenesisHash,
 			ListenAddr:       s.cfg.P2PListenAddr,
 			ValidatorAddress: s.cfg.ValidatorAddress,
 			HeadHeight:       info.HeadHeight,
@@ -151,6 +154,7 @@ func (s *Service) announceSelf(ctx context.Context) {
 		hello := protocol.PeerHello{
 			NodeID:           s.cfg.NodeID,
 			ChainID:          s.cfg.ChainID,
+			GenesisHash:      info.GenesisHash,
 			ListenAddr:       s.cfg.P2PListenAddr,
 			ValidatorAddress: s.cfg.ValidatorAddress,
 			SeenAt:           status.ObservedAt,

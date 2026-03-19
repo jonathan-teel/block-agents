@@ -849,55 +849,11 @@ func (s *Store) QueueRotateAgentKey(ctx context.Context, req protocol.RotateAgen
 }
 
 func (s *Store) QueueUpsertValidator(ctx context.Context, req protocol.UpsertValidatorRequest) (protocol.TransactionStatus, error) {
-	req.Operator = strings.TrimSpace(req.Operator)
-	req.Validator = strings.TrimSpace(req.Validator)
-	req.PublicKey = strings.ToLower(strings.TrimSpace(req.PublicKey))
-
-	switch {
-	case req.Operator == "":
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: operator is required", ErrValidation)
-	case req.Validator == "":
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: validator is required", ErrValidation)
-	case req.PublicKey == "":
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: public_key is required", ErrValidation)
-	case req.Power <= 0:
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: power must be > 0", ErrValidation)
-	}
-
-	payload := struct {
-		Operator  string `json:"operator"`
-		Validator string `json:"validator"`
-		PublicKey string `json:"public_key"`
-		Power     int64  `json:"power"`
-	}{
-		Operator:  req.Operator,
-		Validator: req.Validator,
-		PublicKey: req.PublicKey,
-		Power:     req.Power,
-	}
-
-	return s.enqueueTransaction(ctx, protocol.TxTypeUpsertValidator, req.Operator, req.Auth, payload, true)
+	return protocol.TransactionStatus{}, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
 }
 
 func (s *Store) QueueDeactivateValidator(ctx context.Context, req protocol.DeactivateValidatorRequest) (protocol.TransactionStatus, error) {
-	req.Operator = strings.TrimSpace(req.Operator)
-	req.Validator = strings.TrimSpace(req.Validator)
-	switch {
-	case req.Operator == "":
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: operator is required", ErrValidation)
-	case req.Validator == "":
-		return protocol.TransactionStatus{}, fmt.Errorf("%w: validator is required", ErrValidation)
-	}
-
-	payload := struct {
-		Operator  string `json:"operator"`
-		Validator string `json:"validator"`
-	}{
-		Operator:  req.Operator,
-		Validator: req.Validator,
-	}
-
-	return s.enqueueTransaction(ctx, protocol.TxTypeDeactivateValidator, req.Operator, req.Auth, payload, true)
+	return protocol.TransactionStatus{}, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
 }
 
 func (s *Store) QueueOpenDispute(ctx context.Context, req protocol.OpenDisputeRequest) (protocol.TransactionStatus, error) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"aichain/internal/protocol"
@@ -158,9 +159,6 @@ func (s *Store) ImportStateSnapshot(ctx context.Context, snapshot protocol.State
 	if snapshot.ChainInfo.ChainID == "" || snapshot.HeadBlock.Header.ChainID == "" {
 		return fmt.Errorf("%w: snapshot chain metadata is required", ErrValidation)
 	}
-	if snapshot.ChainInfo.ChainID != s.cfg.Genesis.ChainID || snapshot.HeadBlock.Header.ChainID != s.cfg.Genesis.ChainID {
-		return fmt.Errorf("%w: snapshot chain_id does not match local chain", ErrValidation)
-	}
 	if snapshot.HeadBlock.Hash != protocol.BuildBlockHash(snapshot.HeadBlock.Header) {
 		return fmt.Errorf("%w: snapshot head block hash is invalid", ErrValidation)
 	}
@@ -188,6 +186,20 @@ func (s *Store) ImportStateSnapshot(ctx context.Context, snapshot protocol.State
 		return fmt.Errorf("begin snapshot import transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	meta, err := getMetadataForUpdate(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if snapshot.ChainInfo.ChainID != meta.ChainID || snapshot.HeadBlock.Header.ChainID != meta.ChainID {
+		return fmt.Errorf("%w: snapshot chain_id does not match local chain", ErrValidation)
+	}
+	if strings.TrimSpace(snapshot.ChainInfo.GenesisHash) == "" {
+		return fmt.Errorf("%w: snapshot genesis_hash is required", ErrValidation)
+	}
+	if snapshot.ChainInfo.GenesisHash != meta.GenesisHash {
+		return fmt.Errorf("%w: snapshot genesis_hash does not match local chain", ErrValidation)
+	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tx_pool`); err != nil {
 		return fmt.Errorf("clear tx_pool for snapshot import: %w", err)

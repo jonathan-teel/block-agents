@@ -11,7 +11,7 @@ import (
 
 func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, engine *consensus.Engine, syncProvider SyncStatusProvider) *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(gin.Logger(), gin.Recovery(), requestBodyLimitMiddleware(cfg.MaxRequestBodyBytes))
 
 	handler := NewHandler(store, cfg, peers, engine, syncProvider)
 

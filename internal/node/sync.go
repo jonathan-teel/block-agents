@@ -44,7 +44,7 @@ func (s *Service) syncOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if status.ChainID != s.cfg.ChainID || status.NodeID == s.cfg.NodeID {
+		if status.ChainID != info.ChainID || status.GenesisHash != info.GenesisHash || status.NodeID == s.cfg.NodeID {
 			continue
 		}
 		if s.engine != nil {
@@ -205,6 +205,13 @@ func (s *Service) tryStateSync(ctx context.Context, info protocol.ChainInfo, pee
 	}
 	if snapshot.ChainInfo.ChainID != s.cfg.ChainID {
 		err := fmt.Errorf("snapshot chain_id %s does not match local chain", snapshot.ChainInfo.ChainID)
+		if s.syncTracker != nil {
+			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
+		}
+		return false
+	}
+	if snapshot.ChainInfo.GenesisHash != info.GenesisHash {
+		err := fmt.Errorf("snapshot genesis_hash %s does not match local chain", snapshot.ChainInfo.GenesisHash)
 		if s.syncTracker != nil {
 			s.syncTracker.RecordFailure("state_snapshot", best.NodeID, 0, best.HeadHeight, err)
 		}

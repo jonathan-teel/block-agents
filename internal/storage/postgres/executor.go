@@ -913,66 +913,11 @@ func (s *Store) executeRotateAgentKeyTx(ctx context.Context, tx *sql.Tx, pending
 }
 
 func (s *Store) executeUpsertValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
-	var payload protocol.UpsertValidatorRequest
-	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("decode upsert_validator payload: %w", err)
-	}
-	if pending.Sender != payload.Operator {
-		return nil, fmt.Errorf("%w: sender does not match operator", ErrValidation)
-	}
-
-	active, err := isActiveValidatorTx(ctx, tx, payload.Operator)
-	if err != nil {
-		return nil, err
-	}
-	if !active {
-		return nil, fmt.Errorf("%w: operator is not an active validator", ErrUnauthorized)
-	}
-	if err := upsertValidatorRegistryTx(ctx, tx, payload.Validator, payload.PublicKey, payload.Power, s.cfg.DefaultAgentReputation); err != nil {
-		return nil, err
-	}
-
-	return []protocol.Event{
-		{
-			Type: "validator.upserted",
-			Attributes: map[string]string{
-				"operator":  payload.Operator,
-				"validator": payload.Validator,
-				"power":     strconv.FormatInt(payload.Power, 10),
-			},
-		},
-	}, nil
+	return nil, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
 }
 
 func (s *Store) executeDeactivateValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
-	var payload protocol.DeactivateValidatorRequest
-	if err := json.Unmarshal(pending.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("decode deactivate_validator payload: %w", err)
-	}
-	if pending.Sender != payload.Operator {
-		return nil, fmt.Errorf("%w: sender does not match operator", ErrValidation)
-	}
-
-	active, err := isActiveValidatorTx(ctx, tx, payload.Operator)
-	if err != nil {
-		return nil, err
-	}
-	if !active {
-		return nil, fmt.Errorf("%w: operator is not an active validator", ErrUnauthorized)
-	}
-	if err := deactivateValidatorRegistryTx(ctx, tx, payload.Validator); err != nil {
-		return nil, err
-	}
-
-	return []protocol.Event{
-		{
-			Type: "validator.deactivated",
-			Attributes: map[string]string{
-				"operator":  payload.Operator,
-				"validator": payload.Validator,
-			},
-		},
-	}, nil
+	return nil, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
 }
 
 func updateConsensusTx(ctx context.Context, tx *sql.Tx, maxEffectiveWeight float64) ([]protocol.Event, error) {

@@ -30,6 +30,10 @@ func (s *Service) discoverOnce(ctx context.Context) {
 	if s.peers == nil {
 		return
 	}
+	info, err := s.store.GetChainInfo(ctx)
+	if err != nil {
+		return
+	}
 
 	for _, peer := range s.peers.Peers() {
 		discovered, err := s.peers.FetchPeers(ctx, peer.ListenAddr)
@@ -37,7 +41,7 @@ func (s *Service) discoverOnce(ctx context.Context) {
 			continue
 		}
 		for _, candidate := range discovered {
-			if candidate.NodeID == "" || candidate.ListenAddr == "" || candidate.ChainID != s.cfg.ChainID || candidate.NodeID == s.cfg.NodeID {
+			if candidate.NodeID == "" || candidate.ListenAddr == "" || candidate.ChainID != info.ChainID || candidate.GenesisHash != info.GenesisHash || candidate.NodeID == s.cfg.NodeID {
 				continue
 			}
 			if s.engine != nil {
@@ -57,7 +61,7 @@ func (s *Service) discoverOnce(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if status.NodeID == "" || status.NodeID == s.cfg.NodeID || status.ChainID != s.cfg.ChainID {
+		if status.NodeID == "" || status.NodeID == s.cfg.NodeID || status.ChainID != info.ChainID || status.GenesisHash != info.GenesisHash {
 			continue
 		}
 		if s.engine != nil {
@@ -74,7 +78,8 @@ func (s *Service) discoverOnce(ctx context.Context) {
 
 	_ = s.store.UpsertPeer(ctx, protocol.PeerStatus{
 		NodeID:           s.cfg.NodeID,
-		ChainID:          s.cfg.ChainID,
+		ChainID:          info.ChainID,
+		GenesisHash:      info.GenesisHash,
 		ListenAddr:       s.cfg.P2PListenAddr,
 		ValidatorAddress: s.cfg.ValidatorAddress,
 		ObservedAt:       time.Now().UTC(),

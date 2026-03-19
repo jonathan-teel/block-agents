@@ -21,6 +21,8 @@ type Options struct {
 	MaxBackoff       time.Duration
 	BroadcastDedupTTL time.Duration
 	HelloMinInterval time.Duration
+	AllowPrivateEndpoints bool
+	MaxResponseBytes      int64
 }
 
 type peerRuntime struct {
@@ -58,26 +60,40 @@ func New(listenAddr string, opts Options) *Manager {
 	if opts.HelloMinInterval <= 0 {
 		opts.HelloMinInterval = 3 * time.Second
 	}
+	if opts.MaxResponseBytes <= 0 {
+		opts.MaxResponseBytes = 16 << 20
+	}
 
-	return &Manager{
-		client:     &http.Client{Timeout: 5 * time.Second},
+	manager := &Manager{
 		listenAddr: strings.TrimSpace(listenAddr),
 		opts:       opts,
 		peers:      make(map[string]protocol.PeerStatus),
 		runtime:    make(map[string]*peerRuntime),
 		broadcastDedups: make(map[string]time.Time),
 	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		_, err := normalizePeerBaseURL(req.Context(), req.URL.String(), opts.AllowPrivateEndpoints)
+		return err
+	}
+	manager.client = client
+	return manager
 }
 
 func (m *Manager) RememberPeer(status protocol.PeerStatus) {
 	status.NodeID = strings.TrimSpace(status.NodeID)
-	status.ListenAddr = strings.TrimSpace(status.ListenAddr)
 	status.ChainID = strings.TrimSpace(status.ChainID)
+	status.GenesisHash = strings.TrimSpace(status.GenesisHash)
 	status.ValidatorAddress = strings.TrimSpace(status.ValidatorAddress)
 	status.Signature = strings.TrimSpace(status.Signature)
-	if status.ListenAddr == "" || status.NodeID == "" {
+	if status.NodeID == "" {
 		return
 	}
+	listenAddr, err := normalizePeerBaseURL(context.Background(), status.ListenAddr, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return
+	}
+	status.ListenAddr = listenAddr
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -247,6 +263,10 @@ func (m *Manager) ListenAddr() string {
 
 func (m *Manager) FetchPeerStatus(ctx context.Context, baseURL string) (protocol.PeerStatus, error) {
 	var status protocol.PeerStatus
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return protocol.PeerStatus{}, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, "/v1/p2p/status", &status)
 	}); err != nil {
@@ -257,6 +277,10 @@ func (m *Manager) FetchPeerStatus(ctx context.Context, baseURL string) (protocol
 
 func (m *Manager) FetchPeers(ctx context.Context, baseURL string) ([]protocol.PeerStatus, error) {
 	peers := make([]protocol.PeerStatus, 0)
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return nil, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, "/v1/p2p/peers", &peers)
 	}); err != nil {
@@ -268,6 +292,10 @@ func (m *Manager) FetchPeers(ctx context.Context, baseURL string) ([]protocol.Pe
 func (m *Manager) FetchCertifiedBlock(ctx context.Context, baseURL string, height int64) (protocol.CertifiedBlock, error) {
 	var bundle protocol.CertifiedBlock
 	path := "/v1/p2p/blocks/" + strconv.FormatInt(height, 10) + "/certified"
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return protocol.CertifiedBlock{}, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, path, &bundle)
 	}); err != nil {
@@ -279,6 +307,10 @@ func (m *Manager) FetchCertifiedBlock(ctx context.Context, baseURL string, heigh
 func (m *Manager) FetchCertifiedBlocksRange(ctx context.Context, baseURL string, from int64, limit int) ([]protocol.CertifiedBlock, error) {
 	bundles := make([]protocol.CertifiedBlock, 0)
 	path := "/v1/p2p/blocks/certified?from=" + strconv.FormatInt(from, 10) + "&limit=" + strconv.Itoa(limit)
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return nil, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, path, &bundles)
 	}); err != nil {
@@ -290,6 +322,10 @@ func (m *Manager) FetchCertifiedBlocksRange(ctx context.Context, baseURL string,
 func (m *Manager) FetchCandidateBlock(ctx context.Context, baseURL string, hash string) (protocol.ConsensusCandidateBlock, error) {
 	var bundle protocol.ConsensusCandidateBlock
 	path := "/v1/p2p/candidates/" + strings.TrimSpace(hash)
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return protocol.ConsensusCandidateBlock{}, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, path, &bundle)
 	}); err != nil {
@@ -301,6 +337,10 @@ func (m *Manager) FetchCandidateBlock(ctx context.Context, baseURL string, hash 
 func (m *Manager) FetchStateSnapshot(ctx context.Context, baseURL string, window int) (protocol.StateSnapshot, error) {
 	var snapshot protocol.StateSnapshot
 	path := "/v1/p2p/state/snapshot?window=" + strconv.Itoa(window)
+	baseURL, err := normalizePeerBaseURL(ctx, baseURL, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return protocol.StateSnapshot{}, err
+	}
 	if err := m.getJSON(baseURL, func() error {
 		return m.getJSONInto(ctx, baseURL, path, &snapshot)
 	}); err != nil {
@@ -310,9 +350,9 @@ func (m *Manager) FetchStateSnapshot(ctx context.Context, baseURL string, window
 }
 
 func (m *Manager) postJSONToPeer(ctx context.Context, peer protocol.PeerStatus, path string, body any) error {
-	baseURL := strings.TrimRight(strings.TrimSpace(peer.ListenAddr), "/")
-	if baseURL == "" {
-		return nil
+	baseURL, err := normalizePeerBaseURL(ctx, peer.ListenAddr, m.opts.AllowPrivateEndpoints)
+	if err != nil {
+		return err
 	}
 	if !m.shouldAttempt(baseURL) {
 		return nil
@@ -347,7 +387,6 @@ func (m *Manager) postJSONToPeer(ctx context.Context, peer protocol.PeerStatus, 
 }
 
 func (m *Manager) getJSON(baseURL string, fetch func() error) error {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		return fmt.Errorf("empty peer base URL")
 	}
@@ -363,7 +402,6 @@ func (m *Manager) getJSON(baseURL string, fetch func() error) error {
 }
 
 func (m *Manager) getJSONInto(ctx context.Context, baseURL string, path string, target any) error {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
 	if err != nil {
 		return err
@@ -378,7 +416,14 @@ func (m *Manager) getJSONInto(ctx context.Context, baseURL string, path string, 
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
 		return fmt.Errorf("p2p get %s returned status %d: %s", path, response.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return json.NewDecoder(response.Body).Decode(target)
+	body, err := io.ReadAll(io.LimitReader(response.Body, m.opts.MaxResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > m.opts.MaxResponseBytes {
+		return fmt.Errorf("p2p response exceeded %d bytes", m.opts.MaxResponseBytes)
+	}
+	return json.Unmarshal(body, target)
 }
 
 func (m *Manager) shouldAttempt(baseURL string) bool {

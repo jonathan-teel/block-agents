@@ -30,8 +30,9 @@ Key features:
 - Ed25519 transaction signatures with account nonce replay protection
 - Explicit agent-key bootstrap records and audited key rotation
 - Genesis-defined validator sets and quorum thresholds
-- Persistent validator registry with authenticated membership updates
+- Persistent validator registry with explicit active-set tracking
 - Signed peer hello/status admission backed by validator keys
+- Genesis-hash binding on peer hello/status admission and snapshot sync
 - P2P seed-peer exchange, transitive peer discovery, and consensus message endpoints
 - Experimental BFT-style proposal, prevote, precommit, round-change, and quorum-certificate flow
 - Durable storage for consensus proposals, votes, and certificates
@@ -46,6 +47,7 @@ Key features:
 - Follower-side candidate-block fetch and replay validation before voting
 - Persistent fork-choice preferences by height
 - Retained-window state snapshot export and import for catch-up sync
+- Peer endpoint validation and bounded request/response body sizes in the transport
 - Peer scoring, retry backoff, hello rate limiting, and broadcast deduplication in the transport
 - Peer telemetry for admitted peers and transport health
 - Configurable worker / miner role-selection policies for coordination tasks
@@ -59,13 +61,12 @@ Key features:
 - Post-settlement dispute windows with validator resolution
 - Oracle-backed prediction tasks with persisted oracle reports
 - Validator-governed treasury transfers and app-policy parameter updates
-- Validator membership updates through authenticated validator transactions
-- Validator-aware certified-branch verification across membership changes
+- Validator-aware certified-branch verification against the persisted active set
 - Common-ancestor branch sync and unbounded canonical reorgs under `REORG_POLICY=best_certified`
 - Sync telemetry for branch import and snapshot recovery
 - Query endpoints for chain state, tasks, transactions, validators, peers, fork-choice state, and governance state
 
-The project is suitable for local and devnet deployment. It includes certified block commitment, follower-side candidate replay checks, timeout-driven round changes, validator slashing, authenticated peer admission, validator membership updates, common-ancestor certified sync, deep `best_certified` reorgs, full-state-root verified snapshot recovery, and oracle-backed prediction settlement through persisted external reports.
+The project is suitable for local and devnet deployment. It includes certified block commitment, follower-side candidate replay checks, timeout-driven round changes, validator slashing, genesis-hash-bound peer admission, common-ancestor certified sync, deep `best_certified` reorgs, full-state-root verified snapshot recovery, and oracle-backed prediction settlement through persisted external reports.
 
 ## Coordination Model
 
@@ -156,8 +157,8 @@ The reference node stores both canonical chain data and coordination state in Po
 - `submit_proof`
 - `bootstrap_agent_key`
 - `rotate_agent_key`
-- `upsert_validator`
-- `deactivate_validator`
+- `upsert_validator` (legacy disabled)
+- `deactivate_validator` (legacy disabled)
 - `open_dispute`
 - `resolve_dispute`
 - `submit_governance_proposal`
@@ -189,10 +190,13 @@ export P2P_LISTEN_ADDR="http://127.0.0.1:8080"
 export SEED_PEERS="http://127.0.0.1:8081,http://127.0.0.1:8082"
 export VALIDATOR_ADDRESS="validator-1"
 export VALIDATOR_PRIVATE_KEY="<ed25519-private-key-hex>"
+export ALLOW_PRIVATE_P2P_ENDPOINTS="true"
 export PEER_BASE_BACKOFF_SECONDS="2"
 export PEER_MAX_BACKOFF_SECONDS="60"
 export PEER_HELLO_MIN_INTERVAL_SECONDS="3"
 export PEER_BROADCAST_DEDUP_SECONDS="30"
+export P2P_MAX_RESPONSE_BYTES="16777216"
+export MAX_REQUEST_BODY_BYTES="16777216"
 export CONSENSUS_ROUND_TIMEOUT_SECONDS="10"
 export SYNC_LOOKAHEAD_BLOCKS="6"
 export ROLE_SELECTION_POLICY="balance_reputation"
@@ -269,6 +273,12 @@ BlockAgents exposes protocol-hardening controls through configuration:
   minimum accepted interval between signed peer hello messages per node
 - `PEER_BROADCAST_DEDUP_SECONDS`
   deduplication window for proposal, vote, round-change, and certified-block rebroadcast
+- `ALLOW_PRIVATE_P2P_ENDPOINTS`
+  opt-in override for local or private-network peer endpoints; default behavior rejects private and loopback targets
+- `P2P_MAX_RESPONSE_BYTES`
+  hard cap for peer HTTP response bodies during discovery, sync, and candidate fetch
+- `MAX_REQUEST_BODY_BYTES`
+  hard cap for inbound HTTP request bodies, including consensus, block-import, and snapshot-import routes
 - `ALLOW_EARLY_DEBATE_ADVANCE`
   advance stages once policy thresholds are satisfied instead of waiting only for deadline expiry
 - `MIN_EVALUATIONS_PER_PROPOSAL`
@@ -310,9 +320,9 @@ For validator-driven block production, BlockAgents follows this flow:
 7. Nodes persist round-change messages and recover quorum-derived rounds after restart.
 8. Once `precommit` quorum forms, the preferred certified block is imported through the same replay-verified path used for peer sync and then propagated to peers.
 9. During peer sync, the node finds a common ancestor with each candidate peer, verifies the certified branch with validator-set updates applied block by block, and can switch to the strongest certified branch when `REORG_POLICY=best_certified`.
-10. Peer admission requires validator-signed hello and status messages, and the transport applies backoff and rate limits to unhealthy or noisy peers.
-11. Validator-set changes are applied through authenticated validator transactions and take effect in subsequent proposer selection and branch verification after import.
-12. When a peer is ahead beyond the contiguous certified range the local node can bridge, it may import a retained-window state snapshot whose full state is rehashed and checked against the certified head state root before acceptance.
+10. Peer admission requires validator-signed hello and status messages bound to the local `genesis_hash`, and the transport applies backoff, rate limits, endpoint validation, and message-size caps.
+11. The reference client persists validator membership but does not currently accept direct on-chain validator-set mutation transactions.
+12. When a peer is ahead beyond the contiguous certified range the local node can bridge, it may import a retained-window state snapshot whose `genesis_hash`, certified tip, and recomputed state root must all match before acceptance.
 13. Equivocation is persisted as safety evidence, and the execution layer applies balance and reputation penalties to validator accounts when that evidence is processed on-chain.
 14. Rejected dispute bonds and slashed balances are routed to the configured treasury account.
 
@@ -359,8 +369,8 @@ This keeps local commitment aligned with the experimental BFT layer instead of c
 - `POST /v1/txs/proofs`
 - `POST /v1/txs/agent/bootstrap`
 - `POST /v1/txs/agent/rotate-key`
-- `POST /v1/txs/validators/upsert`
-- `POST /v1/txs/validators/deactivate`
+- `POST /v1/txs/validators/upsert` (legacy disabled)
+- `POST /v1/txs/validators/deactivate` (legacy disabled)
 - `POST /v1/txs/disputes/open`
 - `POST /v1/txs/disputes/resolve`
 - `POST /v1/txs/governance/proposals`

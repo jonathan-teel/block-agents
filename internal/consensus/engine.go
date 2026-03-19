@@ -27,6 +27,7 @@ type Engine struct {
 	set        ValidatorSet
 	tracker    *VoteTracker
 	privateKey ed25519.PrivateKey
+	genesisHash string
 
 	mu               sync.RWMutex
 	proposals        map[string]protocol.ConsensusProposal
@@ -99,6 +100,10 @@ func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine,
 		}
 	}
 	set := NewValidatorSet(validators)
+	info, err := backend.GetChainInfo(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load chain info: %w", err)
+	}
 
 	engine := &Engine{
 		cfg:              cfg,
@@ -110,6 +115,7 @@ func NewEngine(cfg config.Config, peers *p2p.Manager, backend Backend) (*Engine,
 		validatorReader:  nil,
 		set:              set,
 		tracker:          NewVoteTracker(set),
+		genesisHash:      info.GenesisHash,
 		proposals:        make(map[string]protocol.ConsensusProposal),
 		proposalSlots:    make(map[string]string),
 		voteSlots:        make(map[string]protocol.ConsensusVote),
@@ -431,6 +437,7 @@ func (e *Engine) SignPeerHello(message protocol.PeerHello) (protocol.PeerHello, 
 	}
 	message.ValidatorAddress = e.cfg.ValidatorAddress
 	message.ChainID = e.cfg.ChainID
+	message.GenesisHash = e.genesisHash
 	signature, err := SignPeerHello(message, e.privateKey)
 	if err != nil {
 		return protocol.PeerHello{}, err
@@ -443,6 +450,9 @@ func (e *Engine) VerifyPeerHello(message protocol.PeerHello) error {
 	if message.ChainID != e.cfg.ChainID {
 		return fmt.Errorf("unexpected peer hello chain_id %s", message.ChainID)
 	}
+	if strings.TrimSpace(message.GenesisHash) != e.genesisHash {
+		return fmt.Errorf("unexpected peer hello genesis_hash %s", message.GenesisHash)
+	}
 	return VerifyPeerHello(e.set, message)
 }
 
@@ -452,6 +462,7 @@ func (e *Engine) SignPeerStatus(status protocol.PeerStatus) (protocol.PeerStatus
 	}
 	status.ValidatorAddress = e.cfg.ValidatorAddress
 	status.ChainID = e.cfg.ChainID
+	status.GenesisHash = e.genesisHash
 	signature, err := SignPeerStatus(status, e.privateKey)
 	if err != nil {
 		return protocol.PeerStatus{}, err
@@ -463,6 +474,9 @@ func (e *Engine) SignPeerStatus(status protocol.PeerStatus) (protocol.PeerStatus
 func (e *Engine) VerifyPeerStatus(status protocol.PeerStatus) error {
 	if status.ChainID != e.cfg.ChainID {
 		return fmt.Errorf("unexpected peer status chain_id %s", status.ChainID)
+	}
+	if strings.TrimSpace(status.GenesisHash) != e.genesisHash {
+		return fmt.Errorf("unexpected peer status genesis_hash %s", status.GenesisHash)
 	}
 	return VerifyPeerStatus(e.set, status)
 }

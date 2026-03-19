@@ -22,10 +22,13 @@ type Config struct {
 	NodeID                  string
 	ValidatorAddress        string
 	ValidatorPrivateKey     string
+	AllowPrivateP2PEndpoints bool
 	PeerBaseBackoff         time.Duration
 	PeerMaxBackoff          time.Duration
 	PeerHelloMinInterval    time.Duration
 	PeerBroadcastDedupTTL   time.Duration
+	MaxP2PResponseBytes     int64
+	MaxRequestBodyBytes     int64
 	ConsensusRoundTimeout   time.Duration
 	SyncLookaheadBlocks     int
 	RoleSelectionPolicy     string
@@ -67,10 +70,13 @@ func Load() (Config, error) {
 		NodeID:                  getEnv("NODE_ID", hostname),
 		ValidatorAddress:        getEnv("VALIDATOR_ADDRESS", "validator-1"),
 		ValidatorPrivateKey:     txauth.NormalizePublicKey(os.Getenv("VALIDATOR_PRIVATE_KEY")),
+		AllowPrivateP2PEndpoints: getBoolEnv("ALLOW_PRIVATE_P2P_ENDPOINTS", false),
 		PeerBaseBackoff:         time.Duration(getIntEnv("PEER_BASE_BACKOFF_SECONDS", 2)) * time.Second,
 		PeerMaxBackoff:          time.Duration(getIntEnv("PEER_MAX_BACKOFF_SECONDS", 60)) * time.Second,
 		PeerHelloMinInterval:    time.Duration(getIntEnv("PEER_HELLO_MIN_INTERVAL_SECONDS", 3)) * time.Second,
 		PeerBroadcastDedupTTL:   time.Duration(getIntEnv("PEER_BROADCAST_DEDUP_SECONDS", 30)) * time.Second,
+		MaxP2PResponseBytes:     int64(getIntEnv("P2P_MAX_RESPONSE_BYTES", 16<<20)),
+		MaxRequestBodyBytes:     int64(getIntEnv("MAX_REQUEST_BODY_BYTES", 16<<20)),
 		ConsensusRoundTimeout:   time.Duration(getIntEnv("CONSENSUS_ROUND_TIMEOUT_SECONDS", 10)) * time.Second,
 		SyncLookaheadBlocks:     getIntEnv("SYNC_LOOKAHEAD_BLOCKS", 6),
 		RoleSelectionPolicy:     getEnv("ROLE_SELECTION_POLICY", "balance_reputation"),
@@ -113,6 +119,12 @@ func Load() (Config, error) {
 	}
 	if cfg.PeerBroadcastDedupTTL <= 0 {
 		return Config{}, fmt.Errorf("PEER_BROADCAST_DEDUP_SECONDS must be > 0")
+	}
+	if cfg.MaxP2PResponseBytes <= 0 {
+		return Config{}, fmt.Errorf("P2P_MAX_RESPONSE_BYTES must be > 0")
+	}
+	if cfg.MaxRequestBodyBytes <= 0 {
+		return Config{}, fmt.Errorf("MAX_REQUEST_BODY_BYTES must be > 0")
 	}
 	if cfg.ConsensusRoundTimeout <= 0 {
 		return Config{}, fmt.Errorf("CONSENSUS_ROUND_TIMEOUT_SECONDS must be > 0")
@@ -212,7 +224,7 @@ func loadGenesis(chainID string) (protocol.Genesis, error) {
 func defaultGenesis(chainID string) protocol.Genesis {
 	return protocol.Genesis{
 		ChainID:       chainID,
-		GenesisTime:   time.Now().UTC().Truncate(time.Second),
+		GenesisTime:   defaultGenesisTime(),
 		FaucetAddress: "faucet",
 		Accounts: []protocol.GenesisAccount{
 			{Address: "faucet", Balance: 1_000_000, Reputation: 1},
@@ -239,7 +251,7 @@ func normalizeGenesis(genesis *protocol.Genesis, fallbackChainID string) {
 	}
 
 	if genesis.GenesisTime.IsZero() {
-		genesis.GenesisTime = time.Now().UTC().Truncate(time.Second)
+		genesis.GenesisTime = defaultGenesisTime()
 	}
 	genesis.GenesisTime = genesis.GenesisTime.UTC().Truncate(time.Second)
 
@@ -310,6 +322,10 @@ func validateGenesis(genesis protocol.Genesis) error {
 	}
 
 	return nil
+}
+
+func defaultGenesisTime() time.Time {
+	return time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 }
 
 func getEnv(key string, fallback string) string {

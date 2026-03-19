@@ -342,21 +342,9 @@ func ApplyValidatorUpdates(validators []protocol.Validator, block protocol.Block
 
 		switch transaction.Type {
 		case protocol.TxTypeUpsertValidator:
-			var payload protocol.UpsertValidatorRequest
-			if err := json.Unmarshal(transaction.Payload, &payload); err != nil {
-				return nil, fmt.Errorf("decode upsert_validator payload: %w", err)
-			}
-			index[strings.TrimSpace(payload.Validator)] = protocol.Validator{
-				Address:   strings.TrimSpace(payload.Validator),
-				PublicKey: strings.ToLower(strings.TrimSpace(payload.PublicKey)),
-				Power:     payload.Power,
-			}
+			return nil, fmt.Errorf("direct validator membership transactions are disabled")
 		case protocol.TxTypeDeactivateValidator:
-			var payload protocol.DeactivateValidatorRequest
-			if err := json.Unmarshal(transaction.Payload, &payload); err != nil {
-				return nil, fmt.Errorf("decode deactivate_validator payload: %w", err)
-			}
-			delete(index, strings.TrimSpace(payload.Validator))
+			return nil, fmt.Errorf("direct validator membership transactions are disabled")
 		}
 	}
 
@@ -438,6 +426,7 @@ func peerHelloSignBytes(message protocol.PeerHello) []byte {
 	type signablePeerHello struct {
 		NodeID           string    `json:"node_id"`
 		ChainID          string    `json:"chain_id"`
+		GenesisHash      string    `json:"genesis_hash"`
 		ListenAddr       string    `json:"listen_addr"`
 		ValidatorAddress string    `json:"validator_address"`
 		SeenAt           time.Time `json:"seen_at"`
@@ -445,6 +434,7 @@ func peerHelloSignBytes(message protocol.PeerHello) []byte {
 	return mustMarshal(signablePeerHello{
 		NodeID:           strings.TrimSpace(message.NodeID),
 		ChainID:          strings.TrimSpace(message.ChainID),
+		GenesisHash:      strings.TrimSpace(message.GenesisHash),
 		ListenAddr:       strings.TrimSpace(message.ListenAddr),
 		ValidatorAddress: strings.TrimSpace(message.ValidatorAddress),
 		SeenAt:           message.SeenAt.UTC(),
@@ -455,6 +445,7 @@ func peerStatusSignBytes(status protocol.PeerStatus) []byte {
 	type signablePeerStatus struct {
 		NodeID           string    `json:"node_id"`
 		ChainID          string    `json:"chain_id"`
+		GenesisHash      string    `json:"genesis_hash"`
 		ListenAddr       string    `json:"listen_addr"`
 		ValidatorAddress string    `json:"validator_address"`
 		HeadHeight       int64     `json:"head_height"`
@@ -464,6 +455,7 @@ func peerStatusSignBytes(status protocol.PeerStatus) []byte {
 	return mustMarshal(signablePeerStatus{
 		NodeID:           strings.TrimSpace(status.NodeID),
 		ChainID:          strings.TrimSpace(status.ChainID),
+		GenesisHash:      strings.TrimSpace(status.GenesisHash),
 		ListenAddr:       strings.TrimSpace(status.ListenAddr),
 		ValidatorAddress: strings.TrimSpace(status.ValidatorAddress),
 		HeadHeight:       status.HeadHeight,
