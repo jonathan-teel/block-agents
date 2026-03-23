@@ -49,8 +49,6 @@ func NewRouter(store *postgres.Store, cfg config.Config, peers *p2p.Manager, eng
 	router.POST("/v1/txs/proofs", handler.CreateProofTx)
 	router.POST("/v1/txs/agent/bootstrap", handler.BootstrapAgentKeyTx)
 	router.POST("/v1/txs/agent/rotate-key", handler.RotateAgentKeyTx)
-	router.POST("/v1/txs/validators/upsert", handler.UpsertValidatorTx)
-	router.POST("/v1/txs/validators/deactivate", handler.DeactivateValidatorTx)
 	router.POST("/v1/txs/disputes/open", handler.OpenDisputeTx)
 	router.POST("/v1/txs/disputes/resolve", handler.ResolveDisputeTx)
 	router.POST("/v1/txs/governance/proposals", handler.SubmitGovernanceProposalTx)

@@ -369,38 +369,6 @@ func VerifyCertifiedBlock(set ValidatorSet, bundle protocol.CertifiedBlock) erro
 	return nil
 }
 
-func ApplyValidatorUpdates(validators []protocol.Validator, block protocol.Block) ([]protocol.Validator, error) {
-	index := make(map[string]protocol.Validator, len(validators))
-	for _, validator := range validators {
-		index[validator.Address] = validator
-	}
-
-	for position, transaction := range block.Transactions {
-		if position >= len(block.Receipts) || !block.Receipts[position].Success {
-			continue
-		}
-
-		switch transaction.Type {
-		case protocol.TxTypeUpsertValidator:
-			return nil, fmt.Errorf("direct validator membership transactions are disabled")
-		case protocol.TxTypeDeactivateValidator:
-			return nil, fmt.Errorf("direct validator membership transactions are disabled")
-		}
-	}
-
-	next := make([]protocol.Validator, 0, len(index))
-	for _, validator := range index {
-		next = append(next, validator)
-	}
-	sort.Slice(next, func(i, j int) bool {
-		if next[i].Address == next[j].Address {
-			return next[i].PublicKey < next[j].PublicKey
-		}
-		return next[i].Address < next[j].Address
-	})
-	return next, nil
-}
-
 func voteKey(height int64, round int, voteType string, blockHash string) string {
 	return fmt.Sprintf("%d/%d/%s/%s", height, round, voteType, blockHash)
 }

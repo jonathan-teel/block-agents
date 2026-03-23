@@ -153,7 +153,7 @@ Quorum is calculated as:
 floor((2 * total_voting_power) / 3) + 1
 ```
 
-The reference node persists the validator set in `validator_registry` so active membership can be exported in snapshots and reused when consensus state is recovered after restart. Direct validator-set mutation transactions are disabled in the reference client.
+The reference node persists the validator set in `validator_registry` so active membership can be exported in snapshots and reused when consensus state is recovered after restart. Validator membership is currently static or administratively managed in the reference client rather than mutated by public transaction paths.
 
 ### Consensus Messages
 
@@ -311,42 +311,6 @@ Execution rules:
 - `new_public_key` must differ from the current public key
 - `new_signature` must prove possession of the replacement key over the rotation sign-bytes
 - successful rotations are recorded in `agent_key_rotations`
-
-### `upsert_validator`
-
-Legacy transaction type. Direct validator-set mutation transactions are disabled in the reference client.
-
-Payload:
-
-```json
-{
-  "operator": "validator-1",
-  "validator": "validator-3",
-  "public_key": "<ed25519-public-key-hex>",
-  "power": 10
-}
-```
-
-Execution result:
-
-- the transaction is rejected as a disabled direct validator-set mutation path
-
-### `deactivate_validator`
-
-Legacy transaction type. Direct validator-set mutation transactions are disabled in the reference client.
-
-Payload:
-
-```json
-{
-  "operator": "validator-1",
-  "validator": "validator-3"
-}
-```
-
-Execution result:
-
-- the transaction is rejected as a disabled direct validator-set mutation path
 
 ### `open_dispute`
 

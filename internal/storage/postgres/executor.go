@@ -68,10 +68,6 @@ func (s *Store) executeTransaction(ctx context.Context, tx *sql.Tx, pending pend
 		return s.executeBootstrapAgentKeyTx(ctx, tx, pending)
 	case protocol.TxTypeRotateAgentKey:
 		return s.executeRotateAgentKeyTx(ctx, tx, pending)
-	case protocol.TxTypeUpsertValidator:
-		return s.executeUpsertValidatorTx(ctx, tx, pending)
-	case protocol.TxTypeDeactivateValidator:
-		return s.executeDeactivateValidatorTx(ctx, tx, pending)
 	case protocol.TxTypeOpenDispute:
 		return s.executeOpenDisputeTx(ctx, tx, pending, nowUnix)
 	case protocol.TxTypeResolveDispute:
@@ -910,14 +906,6 @@ func (s *Store) executeRotateAgentKeyTx(ctx context.Context, tx *sql.Tx, pending
 			},
 		},
 	}, nil
-}
-
-func (s *Store) executeUpsertValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
-	return nil, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
-}
-
-func (s *Store) executeDeactivateValidatorTx(ctx context.Context, tx *sql.Tx, pending pendingTx) ([]protocol.Event, error) {
-	return nil, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
 }
 
 func updateConsensusTx(ctx context.Context, tx *sql.Tx, maxEffectiveWeight float64) ([]protocol.Event, error) {

@@ -54,8 +54,6 @@ const (
 	TxTypeFundAgent         TxType = "fund_agent"
 	TxTypeBootstrapAgentKey TxType = "bootstrap_agent_key"
 	TxTypeRotateAgentKey    TxType = "rotate_agent_key"
-	TxTypeUpsertValidator   TxType = "upsert_validator"
-	TxTypeDeactivateValidator TxType = "deactivate_validator"
 	TxTypeOpenDispute       TxType = "open_dispute"
 	TxTypeResolveDispute    TxType = "resolve_dispute"
 	TxTypeSubmitGovernanceProposal TxType = "submit_governance_proposal"
@@ -501,20 +499,6 @@ type RotateAgentKeyRequest struct {
 	NewPublicKey string `json:"new_public_key"`
 	NewSignature string `json:"new_signature"`
 	Auth         TxAuth `json:"auth"`
-}
-
-type UpsertValidatorRequest struct {
-	Operator  string `json:"operator"`
-	Validator string `json:"validator"`
-	PublicKey string `json:"public_key"`
-	Power     int64  `json:"power"`
-	Auth      TxAuth `json:"auth"`
-}
-
-type DeactivateValidatorRequest struct {
-	Operator  string `json:"operator"`
-	Validator string `json:"validator"`
-	Auth      TxAuth `json:"auth"`
 }
 
 type OpenDisputeRequest struct {

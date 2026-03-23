@@ -627,38 +627,6 @@ func (h *Handler) RotateAgentKeyTx(c *gin.Context) {
 	c.JSON(http.StatusAccepted, status)
 }
 
-func (h *Handler) UpsertValidatorTx(c *gin.Context) {
-	var req protocol.UpsertValidatorRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	status, err := h.store.QueueUpsertValidator(c.Request.Context(), req)
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-
-	c.JSON(http.StatusAccepted, status)
-}
-
-func (h *Handler) DeactivateValidatorTx(c *gin.Context) {
-	var req protocol.DeactivateValidatorRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	status, err := h.store.QueueDeactivateValidator(c.Request.Context(), req)
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-
-	c.JSON(http.StatusAccepted, status)
-}
-
 func (h *Handler) OpenDisputeTx(c *gin.Context) {
 	var req protocol.OpenDisputeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

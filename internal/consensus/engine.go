@@ -416,17 +416,11 @@ func (e *Engine) VerifyCertifiedBlock(bundle protocol.CertifiedBlock) error {
 }
 
 func (e *Engine) VerifyCertifiedBranch(bundles []protocol.CertifiedBlock) error {
-	validators := e.Validators()
-	set := NewValidatorSet(validators)
+	set := NewValidatorSet(e.Validators())
 	for _, bundle := range bundles {
 		if err := VerifyCertifiedBlock(set, bundle); err != nil {
 			return err
 		}
-		next, err := ApplyValidatorUpdates(set.Validators(), bundle.Block)
-		if err != nil {
-			return err
-		}
-		set = NewValidatorSet(next)
 	}
 	return nil
 }

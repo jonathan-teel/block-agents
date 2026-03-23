@@ -849,14 +849,6 @@ func (s *Store) QueueRotateAgentKey(ctx context.Context, req protocol.RotateAgen
 	return s.enqueueTransaction(ctx, protocol.TxTypeRotateAgentKey, req.Agent, req.Auth, payload, true)
 }
 
-func (s *Store) QueueUpsertValidator(ctx context.Context, req protocol.UpsertValidatorRequest) (protocol.TransactionStatus, error) {
-	return protocol.TransactionStatus{}, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
-}
-
-func (s *Store) QueueDeactivateValidator(ctx context.Context, req protocol.DeactivateValidatorRequest) (protocol.TransactionStatus, error) {
-	return protocol.TransactionStatus{}, fmt.Errorf("%w: direct validator membership transactions are disabled", ErrValidation)
-}
-
 func (s *Store) QueueOpenDispute(ctx context.Context, req protocol.OpenDisputeRequest) (protocol.TransactionStatus, error) {
 	req.TaskID = strings.TrimSpace(req.TaskID)
 	req.Challenger = strings.TrimSpace(req.Challenger)
