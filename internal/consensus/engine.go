@@ -249,21 +249,15 @@ func (e *Engine) HandleProposal(ctx context.Context, proposal protocol.Consensus
 		return fmt.Errorf("unexpected proposal chain_id %s", proposal.ChainID)
 	}
 
-	e.mu.Lock()
-	currentRound := e.currentRoundLocked(proposal.Height)
-	if proposal.Round < currentRound {
-		e.mu.Unlock()
-		return fmt.Errorf("stale proposal round %d for height=%d current_round=%d", proposal.Round, proposal.Height, currentRound)
-	}
-	if proposal.Round > currentRound {
-		e.currentRounds[proposal.Height] = proposal.Round
-		delete(e.openHeights, proposal.Height)
-	}
-	e.observedAt[proposal.Height] = time.Now().UTC()
-	e.mu.Unlock()
-
 	if err := VerifyProposal(e.set, proposal); err != nil {
 		return err
+	}
+
+	e.mu.RLock()
+	currentRound := e.currentRoundLocked(proposal.Height)
+	e.mu.RUnlock()
+	if proposal.Round < currentRound {
+		return fmt.Errorf("stale proposal round %d for height=%d current_round=%d", proposal.Round, proposal.Height, currentRound)
 	}
 	if e.recorder != nil {
 		if err := e.recorder.RecordConsensusProposal(ctx, proposal); err != nil {
@@ -276,10 +270,29 @@ func (e *Engine) HandleProposal(ctx context.Context, proposal protocol.Consensus
 	if err := e.ensureCandidateBlock(ctx, proposal); err != nil {
 		return err
 	}
+	if err := e.acceptProposal(proposal); err != nil {
+		return err
+	}
 
 	if err := e.castLocalVote(ctx, proposal.Height, proposal.Round, proposal.BlockHash, VoteTypePrevote); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (e *Engine) acceptProposal(proposal protocol.ConsensusProposal) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	currentRound := e.currentRoundLocked(proposal.Height)
+	if proposal.Round < currentRound {
+		return fmt.Errorf("stale proposal round %d for height=%d current_round=%d", proposal.Round, proposal.Height, currentRound)
+	}
+	if proposal.Round > currentRound {
+		e.currentRounds[proposal.Height] = proposal.Round
+		delete(e.openHeights, proposal.Height)
+	}
+	e.observedAt[proposal.Height] = time.Now().UTC()
 	return nil
 }
 

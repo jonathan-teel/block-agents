@@ -348,6 +348,140 @@ func TestEngineRecordsDoubleVoteEvidence(t *testing.T) {
 	}
 }
 
+func TestHandleProposalRejectsInvalidHigherRoundWithoutMutatingState(t *testing.T) {
+	pub1, _, _ := ed25519.GenerateKey(nil)
+	pub2, _, _ := ed25519.GenerateKey(nil)
+	pub3, _, _ := ed25519.GenerateKey(nil)
+
+	cfg := config.Config{
+		ChainID: "blockagents-devnet-1",
+		Genesis: protocol.Genesis{
+			ChainID: "blockagents-devnet-1",
+			Validators: []protocol.GenesisValidator{
+				{Address: "alice", PublicKey: hex.EncodeToString(pub1), Power: 1},
+				{Address: "bob", PublicKey: hex.EncodeToString(pub2), Power: 1},
+				{Address: "carol", PublicKey: hex.EncodeToString(pub3), Power: 1},
+			},
+		},
+	}
+
+	backend := &mockBackend{}
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	observedAt := time.Now().UTC().Add(-time.Minute)
+	engine.mu.Lock()
+	engine.currentRounds[5] = 1
+	engine.openHeights[5] = "local-block"
+	engine.observedAt[5] = observedAt
+	engine.mu.Unlock()
+
+	proposal := protocol.ConsensusProposal{
+		ChainID:     cfg.ChainID,
+		Height:      5,
+		Round:       2,
+		Proposer:    "bob",
+		BlockHash:   "remote-block",
+		BlockHeight: 5,
+		ParentHash:  "parent",
+		ProposedAt:  time.Now().UTC(),
+		Signature:   "deadbeef",
+	}
+	if err := engine.HandleProposal(context.Background(), proposal); err == nil {
+		t.Fatal("expected invalid proposal error")
+	}
+
+	if engine.CurrentRound(5) != 1 {
+		t.Fatalf("expected round to remain 1, got %d", engine.CurrentRound(5))
+	}
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	if engine.openHeights[5] != "local-block" {
+		t.Fatalf("expected pending height to remain local-block, got %q", engine.openHeights[5])
+	}
+	if !engine.observedAt[5].Equal(observedAt) {
+		t.Fatalf("expected observedAt to remain unchanged, got %s", engine.observedAt[5])
+	}
+	if len(backend.proposals) != 0 {
+		t.Fatalf("expected invalid proposal to not be recorded, got %d records", len(backend.proposals))
+	}
+}
+
+func TestHandleProposalAdvancesRoundAfterAcceptance(t *testing.T) {
+	pub1, _, _ := ed25519.GenerateKey(nil)
+	pub2, priv2, _ := ed25519.GenerateKey(nil)
+	pub3, _, _ := ed25519.GenerateKey(nil)
+
+	cfg := config.Config{
+		ChainID: "blockagents-devnet-1",
+		Genesis: protocol.Genesis{
+			ChainID: "blockagents-devnet-1",
+			Validators: []protocol.GenesisValidator{
+				{Address: "alice", PublicKey: hex.EncodeToString(pub1), Power: 1},
+				{Address: "bob", PublicKey: hex.EncodeToString(pub2), Power: 1},
+				{Address: "carol", PublicKey: hex.EncodeToString(pub3), Power: 1},
+			},
+		},
+	}
+
+	backend := &mockBackend{}
+	engine, err := NewEngine(cfg, p2p.New("http://127.0.0.1:8080", p2p.Options{}), backend)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	observedAt := time.Now().UTC().Add(-time.Minute)
+	block := protocol.Block{
+		Hash: "remote-block",
+		Header: protocol.BlockHeader{
+			ChainID:    cfg.ChainID,
+			Height:     5,
+			ParentHash: "parent",
+			Proposer:   "bob",
+		},
+	}
+	engine.mu.Lock()
+	engine.currentRounds[5] = 1
+	engine.openHeights[5] = "local-block"
+	engine.observedAt[5] = observedAt
+	engine.candidateBlocks[block.Hash] = block
+	engine.mu.Unlock()
+
+	proposal := protocol.ConsensusProposal{
+		ChainID:     cfg.ChainID,
+		Height:      5,
+		Round:       2,
+		Proposer:    "bob",
+		BlockHash:   block.Hash,
+		BlockHeight: block.Header.Height,
+		ParentHash:  block.Header.ParentHash,
+		ProposedAt:  time.Now().UTC(),
+	}
+	signature, _ := SignProposal(proposal, priv2)
+	proposal.Signature = signature
+
+	if err := engine.HandleProposal(context.Background(), proposal); err != nil {
+		t.Fatalf("handle proposal: %v", err)
+	}
+
+	if engine.CurrentRound(5) != 2 {
+		t.Fatalf("expected round to advance to 2, got %d", engine.CurrentRound(5))
+	}
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	if _, ok := engine.openHeights[5]; ok {
+		t.Fatalf("expected accepted higher-round proposal to clear pending height")
+	}
+	if !engine.observedAt[5].After(observedAt) {
+		t.Fatalf("expected observedAt to advance, got %s", engine.observedAt[5])
+	}
+	if len(backend.proposals) != 1 {
+		t.Fatalf("expected one recorded proposal, got %d", len(backend.proposals))
+	}
+}
+
 func TestHandleRoundChangeAdvancesRoundAfterQuorum(t *testing.T) {
 	pub1, priv1, _ := ed25519.GenerateKey(nil)
 	pub2, priv2, _ := ed25519.GenerateKey(nil)
